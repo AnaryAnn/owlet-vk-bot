@@ -15,9 +15,6 @@ GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
 
-# Защита от повторной обработки одного события VK
-processed_events = set()
-
 
 def vk_send(peer_id, text):
     r = requests.post(
@@ -78,10 +75,37 @@ def google_post(payload):
     return r.json()
 
 
+def check_event(event_id, user_id, peer_id):
+    if not event_id:
+        return False
+
+    result = google_post(
+        {
+            "action": "checkEvent",
+            "eventId": event_id,
+            "vkId": str(user_id),
+            "peerId": str(peer_id),
+        }
+    )
+
+    return result.get("exists", False)
+
+
+def mark_event(event_id, user_id, peer_id):
+    if not event_id:
+        return
+
+    google_post(
+        {
+            "action": "markEventProcessed",
+            "eventId": event_id,
+            "vkId": str(user_id),
+            "peerId": str(peer_id),
+        }
+    )
+
+
 def text_after_bot_tag(text):
-    """
-    Возвращает текст после упоминания бота.
-    """
     if not VK_GROUP_ID:
         return None
 
@@ -93,7 +117,12 @@ def text_after_bot_tag(text):
     ]
 
     for pattern in patterns:
-        match = re.match(pattern, text, flags=re.IGNORECASE)
+
+        match = re.match(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        )
 
         if match:
             return text[match.end():].strip()
@@ -105,7 +134,7 @@ def text_after_bot_tag(text):
 def health():
     return {
         "ok": True,
-        "service": "sychnaya-ohota-v6.1"
+        "service": "sychnaya-ohota-v6.2"
     }
 
 
@@ -114,39 +143,33 @@ def vk_callback():
 
     data = request.get_json(silent=True) or {}
 
-    # подтверждение Callback API
+
+    # подтверждение VK
     if data.get("type") == "confirmation":
+
         return Response(
             VK_CONFIRMATION_CODE,
             mimetype="text/plain"
         )
 
-    # защита от дублей
-    event_id = data.get("event_id")
 
-    if event_id:
+    # проверка группы
 
-        if event_id in processed_events:
-            print("Duplicate event ignored:", event_id)
-            return Response("ok", mimetype="text/plain")
-
-        processed_events.add(event_id)
-
-        if len(processed_events) > 1000:
-            processed_events.clear()
-
-
-    # проверяем группу
     if VK_GROUP_ID and str(data.get("group_id", "")) != VK_GROUP_ID:
         return Response("ok", mimetype="text/plain")
 
 
     # только сообщения
+
     if data.get("type") != "message_new":
         return Response("ok", mimetype="text/plain")
 
 
-    message = ((data.get("object") or {}).get("message") or {})
+    message = (
+        (data.get("object") or {})
+        .get("message") or {}
+    )
+
 
     user_id = message.get("from_id")
     peer_id = message.get("peer_id")
@@ -158,39 +181,64 @@ def vk_callback():
 
 
     # только беседы
+
     if int(peer_id) < 2000000000:
         return Response("ok", mimetype="text/plain")
 
 
-    # бот должен быть отмечен
-    payload_text = text_after_bot_tag(text)
+    # защита от дублей
 
-    if payload_text is None:
-        return Response("ok", mimetype="text/plain")
+    event_id = data.get("event_id")
+
+    try:
+
+        if check_event(event_id, user_id, peer_id):
+
+            print(
+                "Duplicate event ignored:",
+                event_id
+            )
+
+            return Response(
+                "ok",
+                mimetype="text/plain"
+            )
 
 
-    match = PAIR_RE.match(payload_text)
+        # проверяем тег
+
+        payload_text = text_after_bot_tag(text)
 
 
-    if not match:
+        if payload_text is None:
+            return Response(
+                "ok",
+                mimetype="text/plain"
+            )
 
-        try:
+
+        match = PAIR_RE.match(payload_text)
+
+
+        if not match:
+
             vk_send(
                 peer_id,
                 "🦉 После упоминания бота отправь план и факт через запятую.\n"
                 "Например: @Робосычик 30, 17"
             )
 
-        except Exception as exc:
-            print("VK send error:", exc)
-
-        return Response("ok", mimetype="text/plain")
-
-
-    plan, fact = map(int, match.groups())
+            return Response(
+                "ok",
+                mimetype="text/plain"
+            )
 
 
-    try:
+        plan, fact = map(
+            int,
+            match.groups()
+        )
+
 
         result = google_post(
             {
@@ -203,6 +251,7 @@ def vk_callback():
 
 
         # новый пользователь
+
         if result.get("unknownVkUser"):
 
             profile = vk_get_user(user_id)
@@ -218,7 +267,7 @@ def vk_callback():
             )
 
 
-            if bind_result.get("success") and bind_result.get("name"):
+            if bind_result.get("success"):
 
                 result = google_post(
                     {
@@ -241,8 +290,12 @@ def vk_callback():
 
                 vk_send(
                     peer_id,
-                    "🦉 Не смогла однозначно сопоставить твой профиль "
-                    "с участником."
+                    "🦉 Не смогла однозначно определить участника."
+                )
+
+                return Response(
+                    "ok",
+                    mimetype="text/plain"
                 )
 
 
@@ -251,7 +304,12 @@ def vk_callback():
                 vk_send(
                     peer_id,
                     f"🦉 Не нашла тебя в списке участников.\n"
-                    f"Твой VK ID: {user_id}"
+                    f"VK ID: {user_id}"
+                )
+
+                return Response(
+                    "ok",
+                    mimetype="text/plain"
                 )
 
 
@@ -269,22 +327,41 @@ def vk_callback():
 
             vk_send(
                 peer_id,
-                "Не удалось сохранить данные. Попробуй немного позже."
+                "Не удалось сохранить данные."
             )
+
+            return Response(
+                "ok",
+                mimetype="text/plain"
+            )
+
+
+        # только после успешного сохранения
+        mark_event(
+            event_id,
+            user_id,
+            peer_id
+        )
 
 
     except Exception as exc:
 
-        print("PROCESSING ERROR:", repr(exc))
+        print(
+            "PROCESSING ERROR:",
+            repr(exc)
+        )
 
         try:
             vk_send(
                 peer_id,
-                "Не удалось сохранить данные. Попробуй немного позже."
+                "Не удалось сохранить данные. Попробуй позже."
             )
 
         except Exception:
             pass
 
 
-    return Response("ok", mimetype="text/plain")
+    return Response(
+        "ok",
+        mimetype="text/plain"
+    )
