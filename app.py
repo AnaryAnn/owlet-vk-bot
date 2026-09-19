@@ -75,6 +75,9 @@ def health():
 def vk_callback():
     data = request.get_json(silent=True) or {}
 
+    print("=== VK EVENT ===")
+    print(data)
+
     if data.get("type") == "confirmation":
         return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
 
