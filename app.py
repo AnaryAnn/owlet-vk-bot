@@ -85,9 +85,11 @@ def vk_callback():
         return Response("ok", mimetype="text/plain")
 
     message = ((data.get("object") or {}).get("message") or {})
+    print("INCOMING MESSAGE:", message)
     user_id = message.get("from_id")
     peer_id = message.get("peer_id")
     text = (message.get("text") or "").strip()
+    print("TEXT:", text)
 
     if not user_id or not peer_id:
         return Response("ok", mimetype="text/plain")
