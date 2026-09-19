@@ -16,6 +16,14 @@ GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
 
 
+def google_post(payload):
+    payload = dict(payload)
+    payload["password"] = GOOGLE_SCRIPT_PASSWORD
+    r = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
 def vk_send(peer_id, text):
     r = requests.post(
         "https://api.vk.com/method/messages.send",
@@ -28,340 +36,125 @@ def vk_send(peer_id, text):
         },
         timeout=10,
     )
-
     r.raise_for_status()
-
-    result = r.json()
-
-    if "error" in result:
-        raise RuntimeError(str(result["error"]))
 
 
 def vk_get_user(user_id):
     r = requests.get(
         "https://api.vk.com/method/users.get",
-        params={
-            "access_token": VK_TOKEN,
-            "v": "5.199",
-            "user_ids": user_id,
-        },
+        params={"access_token": VK_TOKEN, "v": "5.199", "user_ids": user_id},
         timeout=10,
     )
-
     r.raise_for_status()
-
-    payload = r.json()
-
-    if "error" in payload:
-        raise RuntimeError(str(payload["error"]))
-
-    users = payload.get("response") or []
-
-    return users[0] if users else {}
-
-
-def google_post(payload):
-    payload = dict(payload)
-    payload["password"] = GOOGLE_SCRIPT_PASSWORD
-
-    r = requests.post(
-        GOOGLE_SCRIPT_URL,
-        json=payload,
-        timeout=15,
-    )
-
-    r.raise_for_status()
-
-    return r.json()
-
-
-def check_event(event_id, user_id, peer_id):
-    if not event_id:
-        return False
-
-    result = google_post(
-        {
-            "action": "checkEvent",
-            "eventId": event_id,
-            "vkId": str(user_id),
-            "peerId": str(peer_id),
-        }
-    )
-
-    return result.get("exists", False)
-
-
-def mark_event(event_id, user_id, peer_id):
-    if not event_id:
-        return
-
-    google_post(
-        {
-            "action": "markEventProcessed",
-            "eventId": event_id,
-            "vkId": str(user_id),
-            "peerId": str(peer_id),
-        }
-    )
+    return (r.json().get("response") or [{}])[0]
 
 
 def text_after_bot_tag(text):
-    if not VK_GROUP_ID:
-        return None
-
     gid = re.escape(VK_GROUP_ID)
-
-    patterns = [
+    for p in [
         rf"^\s*\[club{gid}\|[^\]]+\]\s*",
         rf"^\s*@club{gid}\b[\s,:-]*",
-    ]
-
-    for pattern in patterns:
-
-        match = re.match(
-            pattern,
-            text,
-            flags=re.IGNORECASE
-        )
-
-        if match:
-            return text[match.end():].strip()
-
+    ]:
+        m = re.match(p, text, re.I)
+        if m:
+            return text[m.end():].strip()
     return None
+
+
+def mark_event(event_id, user_id, peer_id):
+    google_post({
+        "action": "markEventProcessed",
+        "eventId": event_id,
+        "vkId": str(user_id),
+        "peerId": str(peer_id),
+    })
 
 
 @app.get("/")
 def health():
-    return {
-        "ok": True,
-        "service": "sychnaya-ohota-v6.2"
-    }
+    return {"ok": True, "service": "sychnaya-ohota-v6.3"}
 
 
 @app.post("/vk")
 def vk_callback():
-
     data = request.get_json(silent=True) or {}
 
-
-    # подтверждение VK
     if data.get("type") == "confirmation":
-
-        return Response(
-            VK_CONFIRMATION_CODE,
-            mimetype="text/plain"
-        )
-
-
-    # проверка группы
-
-    if VK_GROUP_ID and str(data.get("group_id", "")) != VK_GROUP_ID:
-        return Response("ok", mimetype="text/plain")
-
-
-    # только сообщения
+        return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
 
     if data.get("type") != "message_new":
-        return Response("ok", mimetype="text/plain")
+        return Response("ok")
 
+    if str(data.get("group_id", "")) != VK_GROUP_ID:
+        return Response("ok")
 
-    message = (
-        (data.get("object") or {})
-        .get("message") or {}
-    )
-
-
-    user_id = message.get("from_id")
-    peer_id = message.get("peer_id")
-    text = (message.get("text") or "").strip()
-
-
-    if not user_id or not peer_id:
-        return Response("ok", mimetype="text/plain")
-
-
-    # только беседы
-
-    if int(peer_id) < 2000000000:
-        return Response("ok", mimetype="text/plain")
-
-
-    # защита от дублей
-
+    msg = ((data.get("object") or {}).get("message") or {})
+    user_id = msg.get("from_id")
+    peer_id = msg.get("peer_id")
+    text = (msg.get("text") or "").strip()
     event_id = data.get("event_id")
 
+    if not user_id or not peer_id or int(peer_id) < 2000000000:
+        return Response("ok")
+
+    check = google_post({
+        "action": "checkEvent",
+        "eventId": event_id,
+        "vkId": str(user_id),
+        "peerId": str(peer_id),
+    })
+
+    if check.get("exists"):
+        return Response("ok")
+
+    payload = text_after_bot_tag(text)
+    if payload is None:
+        return Response("ok")
+
+    m = PAIR_RE.match(payload)
+
+    if not m:
+        vk_send(peer_id, "🦉 Формат: план, факт\nНапример: 30, 17")
+        return Response("ok")
+
+    plan, fact = map(int, m.groups())
+
     try:
-
-        if check_event(event_id, user_id, peer_id):
-
-            print(
-                "Duplicate event ignored:",
-                event_id
-            )
-
-            return Response(
-                "ok",
-                mimetype="text/plain"
-            )
-
-
-        # проверяем тег
-
-        payload_text = text_after_bot_tag(text)
-
-
-        if payload_text is None:
-            return Response(
-                "ok",
-                mimetype="text/plain"
-            )
-
-
-        match = PAIR_RE.match(payload_text)
-
-
-        if not match:
-
-            vk_send(
-                peer_id,
-                "🦉 После упоминания бота отправь план и факт через запятую.\n"
-                "Например: @Робосычик 30, 17"
-            )
-
-            return Response(
-                "ok",
-                mimetype="text/plain"
-            )
-
-
-        plan, fact = map(
-            int,
-            match.groups()
-        )
-
-
-        result = google_post(
-            {
-                "action": "vkSave",
-                "vkId": str(user_id),
-                "plan": plan,
-                "fact": fact,
-            }
-        )
-
-
-        # новый пользователь
+        result = google_post({
+            "action": "vkSave",
+            "vkId": str(user_id),
+            "plan": plan,
+            "fact": fact,
+        })
 
         if result.get("unknownVkUser"):
-
             profile = vk_get_user(user_id)
+            bind = google_post({
+                "action": "vkAutoBind",
+                "vkId": str(user_id),
+                "firstName": profile.get("first_name", ""),
+                "lastName": profile.get("last_name", ""),
+            })
 
-
-            bind_result = google_post(
-                {
-                    "action": "vkAutoBind",
+            if bind.get("success"):
+                result = google_post({
+                    "action": "vkSave",
                     "vkId": str(user_id),
-                    "firstName": profile.get("first_name", ""),
-                    "lastName": profile.get("last_name", ""),
-                }
-            )
+                    "plan": plan,
+                    "fact": fact,
+                })
 
-
-            if bind_result.get("success"):
-
-                result = google_post(
-                    {
-                        "action": "vkSave",
-                        "vkId": str(user_id),
-                        "plan": plan,
-                        "fact": fact,
-                    }
-                )
-
-
-                vk_send(
-                    peer_id,
-                    f"🦉 Нашла тебя: {bind_result.get('name')}\n"
-                    f"Данные сохранены: план {plan} 🐭, факт {fact} 🐭"
-                )
-
-
-            elif bind_result.get("ambiguous"):
-
-                vk_send(
-                    peer_id,
-                    "🦉 Не смогла однозначно определить участника."
-                )
-
-                return Response(
-                    "ok",
-                    mimetype="text/plain"
-                )
-
-
-            else:
-
-                vk_send(
-                    peer_id,
-                    f"🦉 Не нашла тебя в списке участников.\n"
-                    f"VK ID: {user_id}"
-                )
-
-                return Response(
-                    "ok",
-                    mimetype="text/plain"
-                )
-
-
-        elif result.get("success"):
-
-            vk_send(
-                peer_id,
-                f"🦉 Данные сохранены!\n"
-                f"{result.get('name','')}: "
-                f"план {plan} 🐭, факт {fact} 🐭"
-            )
-
-
+        if result.get("success"):
+            mark_event(event_id, user_id, peer_id)
+            vk_send(peer_id, f"🦉 Данные сохранены!\n{result.get('name','')}: план {plan} 🐭, факт {fact} 🐭")
         else:
+            vk_send(peer_id, "Не удалось сохранить данные.")
 
-            vk_send(
-                peer_id,
-                "Не удалось сохранить данные."
-            )
-
-            return Response(
-                "ok",
-                mimetype="text/plain"
-            )
-
-
-        # только после успешного сохранения
-        mark_event(
-            event_id,
-            user_id,
-            peer_id
-        )
-
-
-    except Exception as exc:
-
-        print(
-            "PROCESSING ERROR:",
-            repr(exc)
-        )
-
+    except Exception as e:
+        print("ERROR:", repr(e))
         try:
-            vk_send(
-                peer_id,
-                "Не удалось сохранить данные. Попробуй позже."
-            )
-
+            vk_send(peer_id, "Не удалось сохранить данные.")
         except Exception:
             pass
 
-
-    return Response(
-        "ok",
-        mimetype="text/plain"
-    )
+    return Response("ok")
