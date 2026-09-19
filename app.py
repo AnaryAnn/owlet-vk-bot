@@ -144,6 +144,7 @@ def vk_callback():
                     "plan": plan,
                     "fact": fact,
                 })
+                print("GOOGLE RESULT:", result)
                 vk_send(
                     peer_id,
                     f"🦉 Нашла тебя: {bind_result.get('name')}\n"
@@ -171,7 +172,7 @@ def vk_callback():
         else:
             vk_send(peer_id, "Не удалось сохранить данные. Попробуй немного позже.")
     except Exception as exc:
-        print("Processing error:", exc)
+        print("PROCESSING ERROR:", repr(exc))
         try:
             vk_send(peer_id, "Не удалось сохранить данные. Попробуй немного позже.")
         except Exception:
