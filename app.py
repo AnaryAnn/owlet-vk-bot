@@ -62,12 +62,17 @@ def text_after_bot_tag(text):
 
 
 def mark_event(event_id, user_id, peer_id):
-    google_post({
+    print("MARK EVENT START:", event_id)
+
+    result = google_post({
         "action": "markEventProcessed",
         "eventId": event_id,
         "vkId": str(user_id),
         "peerId": str(peer_id),
     })
+
+    print("MARK EVENT RESULT:", result)
+    return result
 
 
 @app.get("/")
@@ -93,6 +98,7 @@ def vk_callback():
     peer_id = msg.get("peer_id")
     text = (msg.get("text") or "").strip()
     event_id = data.get("event_id")
+    print("EVENT ID:", event_id)
 
     if not user_id or not peer_id or int(peer_id) < 2000000000:
         return Response("ok")
