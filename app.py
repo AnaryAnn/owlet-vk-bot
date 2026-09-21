@@ -7,7 +7,6 @@ def health():
     return {"ok": True, "service": "sychnaya-ohota-v6.4-history-test"}
 
 
-
 @app.post("/vk")
 def vk_callback():
     data = request.get_json(silent=True) or {}
