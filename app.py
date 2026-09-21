@@ -148,12 +148,12 @@ def build_digest(messages):
                 "content": "Переписка за последние 12 часов:\n\n" + transcript,
             },
         ],
-        "temperature": 0.35,
+        "temperature": 0.5,
         "max_tokens": 500,
     }
 
     models = [
-        "google/gemma-4-26b-a4b-it:free",
+        "dots-studio/dots-3-note-preview-20260813:free",
         "google/gemma-4-31b-it:free",
     ]
     last_error = None
@@ -416,7 +416,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.4-model-fallback-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.5-dots-primary-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
