@@ -58,6 +58,7 @@ def vk_get_history(peer_id, count=10):
             "access_token": VK_TOKEN,
             "v": "5.199",
             "peer_id": peer_id,
+            "group_id": VK_GROUP_ID,
             "count": count,
         },
         timeout=15,
