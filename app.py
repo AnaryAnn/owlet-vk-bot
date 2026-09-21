@@ -25,12 +25,12 @@ def google_post(payload):
     r.raise_for_status()
     return r.json()
 
-def digest_post(payload):
+def digest_post(payload, timeout=45):
     if not DIGEST_SCRIPT_URL or not DIGEST_SCRIPT_PASSWORD:
         raise RuntimeError("Digest storage is not configured")
     payload = dict(payload)
     payload["password"] = DIGEST_SCRIPT_PASSWORD
-    r = requests.post(DIGEST_SCRIPT_URL, json=payload, timeout=45)
+    r = requests.post(DIGEST_SCRIPT_URL, json=payload, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     if not data.get("success"):
@@ -167,13 +167,20 @@ def save_chat_message(msg, event_id):
         "name":vk_get_name(user_id),
         "text":text,
         "eventId":str(event_id or "")
-    })
+    }, timeout=15)
 
 def mark_event(event_id, user_id, peer_id):
     return google_post({
         "action":"markEventProcessed", "eventId":event_id,
         "vkId":str(user_id), "peerId":str(peer_id)
     })
+
+def save_chat_message_background(msg, event_id):
+    try:
+        save_chat_message(msg, event_id)
+    except Exception as e:
+        print("BACKGROUND DIGEST SAVE ERROR:", repr(e))
+
 
 def generate_digest_background(peer_id):
     try:
@@ -199,7 +206,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v6.7-background-digest-silent"}
+    return {"ok":True, "service":"sychnaya-ohota-v6.8-nonblocking-callback"}
 
 @app.post("/vk")
 def vk_callback():
@@ -221,10 +228,11 @@ def vk_callback():
         if not user_id or not peer_id or int(peer_id) < 2000000000:
             return Response("ok")
 
-        try:
-            save_chat_message(msg, event_id)
-        except Exception as e:
-            print("DIGEST SAVE ERROR:", repr(e))
+        threading.Thread(
+            target=save_chat_message_background,
+            args=(dict(msg), event_id),
+            daemon=True,
+        ).start()
 
         payload = text_after_bot_tag(text)
         if payload is None:
