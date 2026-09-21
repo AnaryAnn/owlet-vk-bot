@@ -1,6 +1,7 @@
 import os
 import re
 import random
+import threading
 import requests
 from flask import Flask, request, Response
 
@@ -29,7 +30,7 @@ def digest_post(payload):
         raise RuntimeError("Digest storage is not configured")
     payload = dict(payload)
     payload["password"] = DIGEST_SCRIPT_PASSWORD
-    r = requests.post(DIGEST_SCRIPT_URL, json=payload, timeout=15)
+    r = requests.post(DIGEST_SCRIPT_URL, json=payload, timeout=45)
     r.raise_for_status()
     data = r.json()
     if not data.get("success"):
@@ -174,9 +175,31 @@ def mark_event(event_id, user_id, peer_id):
         "vkId":str(user_id), "peerId":str(peer_id)
     })
 
+def generate_digest_background(peer_id):
+    try:
+        result = digest_post({
+            "action": "getMessages",
+            "peerId": str(peer_id),
+            "hours": 12,
+        })
+        messages = result.get("messages") or []
+        digest = build_digest(messages)
+        vk_send(peer_id, digest)
+    except Exception as e:
+        print("BACKGROUND DIGEST ERROR:", repr(e))
+        try:
+            vk_send(
+                peer_id,
+                "🦉 Не удалось собрать Сычевестник. "
+                "Робосычик записал ошибку в журнал 🤖"
+            )
+        except Exception as send_error:
+            print("BACKGROUND DIGEST SEND ERROR:", repr(send_error))
+
+
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v6.6-openrouter-digest"}
+    return {"ok":True, "service":"sychnaya-ohota-v6.7-background-digest-silent"}
 
 @app.post("/vk")
 def vk_callback():
@@ -208,25 +231,12 @@ def vk_callback():
             return Response("ok")
 
         if payload.lower() == "дайджест":
-            try:
-                result = digest_post({
-                    "action": "getMessages",
-                    "peerId": str(peer_id),
-                    "hours": 12,
-                })
-                messages = result.get("messages") or []
-                digest = build_digest(messages)
-                vk_send(peer_id, digest)
-            except Exception as e:
-                print("DIGEST ERROR:", repr(e))
-                try:
-                    vk_send(
-                        peer_id,
-                        "🦉 Не удалось собрать Сычевестник. "
-                        "Робосычик записал ошибку в журнал 🤖"
-                    )
-                except Exception:
-                    pass
+            threading.Thread(
+                target=generate_digest_background,
+                args=(peer_id,),
+                daemon=True,
+            ).start()
+
             return Response("ok")
 
         if payload.lower() == "тест буфера":
