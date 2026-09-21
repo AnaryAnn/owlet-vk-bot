@@ -15,7 +15,7 @@ GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
 DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-SYCHEVESTNIK_PEER_ID = 2000000002
+SYCHEVESTNIK_PEER_ID = 2000000001
 MORNING_PHOTO = "photo-241605282_457239021"
 EVENING_PHOTO = "photo-241605282_457239020"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
@@ -169,12 +169,31 @@ def build_digest(messages):
     content = ((choices[0].get("message") or {}).get("content") or "").strip()
     return extract_final_digest(content)
 
-def vk_send(peer_id, text):
-    r = requests.post("https://api.vk.com/method/messages.send", data={
-        "access_token": VK_TOKEN, "v": "5.199", "peer_id": peer_id,
-        "random_id": random.randint(1, 2147483647), "message": text
-    }, timeout=10)
+def vk_send(peer_id, text, attachment=None):
+    data = {
+        "access_token": VK_TOKEN,
+        "v": "5.199",
+        "peer_id": peer_id,
+        "random_id": random.randint(1, 2147483647),
+        "message": text,
+    }
+    if attachment:
+        data["attachment"] = attachment
+
+    r = requests.post(
+        "https://api.vk.com/method/messages.send",
+        data=data,
+        timeout=15,
+    )
     r.raise_for_status()
+
+    result = r.json()
+    if result.get("error"):
+        raise RuntimeError(
+            "VK messages.send error: " +
+            str(result["error"].get("error_msg", result["error"]))
+        )
+    return result
 
 def vk_get_user(user_id):
     r = requests.get("https://api.vk.com/method/users.get", params={
@@ -236,16 +255,43 @@ def build_scheduled_digest(messages, edition):
     return digest
 
 
-def generate_scheduled_digest_background(edition):
+def generate_scheduled_digest(edition):
     peer_id = SYCHEVESTNIK_PEER_ID
     attachment = MORNING_PHOTO if edition == "morning" else EVENING_PHOTO
-    try:
-        result = digest_post({"action": "getMessages", "peerId": str(peer_id), "hours": 12})
-        messages = result.get("messages") or []
-        digest = build_scheduled_digest(messages, edition)
-        vk_send(peer_id, digest, attachment=attachment)
-    except Exception as e:
-        print("SCHEDULED DIGEST ERROR:", edition, repr(e))
+
+    print(
+        "SYCHEVESTNIK START:",
+        "edition=", edition,
+        "peer_id=", peer_id,
+        "attachment=", attachment,
+        flush=True,
+    )
+
+    result = digest_post(
+        {
+            "action": "getMessages",
+            "peerId": str(peer_id),
+            "hours": 12,
+        },
+        timeout=45,
+    )
+    messages = result.get("messages") or []
+    print("SYCHEVESTNIK BUFFER:", len(messages), "messages", flush=True)
+
+    digest = build_scheduled_digest(messages, edition)
+    print("SYCHEVESTNIK DIGEST READY:", len(digest), "chars", flush=True)
+
+    vk_result = vk_send(peer_id, digest, attachment=attachment)
+    print("SYCHEVESTNIK SENT:", vk_result, flush=True)
+
+    return {
+        "success": True,
+        "edition": edition,
+        "peer_id": peer_id,
+        "messages": len(messages),
+        "attachment": attachment,
+        "vk_response": vk_result.get("response"),
+    }
 
 
 def generate_digest_background(peer_id):
@@ -272,19 +318,52 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.0-scheduled-sychevestnik"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.1-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
-    supplied_secret = request.headers.get("X-Schedule-Secret", "").strip() or request.args.get("secret", "").strip()
+    supplied_secret = (
+        request.headers.get("X-Schedule-Secret", "").strip()
+        or request.args.get("secret", "").strip()
+    )
     if not SCHEDULE_SECRET or supplied_secret != SCHEDULE_SECRET:
-        return Response("forbidden", status=403)
+        return {
+            "success": False,
+            "stage": "auth",
+            "error": "forbidden",
+        }, 403
+
     data = request.get_json(silent=True) or {}
-    edition = (data.get("edition") or request.args.get("edition") or "").strip().lower()
+    edition = (
+        data.get("edition")
+        or request.args.get("edition")
+        or ""
+    ).strip().lower()
+
     if edition not in ("morning", "evening"):
-        return Response("edition must be morning or evening", status=400)
-    threading.Thread(target=generate_scheduled_digest_background, args=(edition,), daemon=True).start()
-    return Response("ok")
+        return {
+            "success": False,
+            "stage": "validation",
+            "error": "edition must be morning or evening",
+        }, 400
+
+    try:
+        result = generate_scheduled_digest(edition)
+        return result, 200
+    except requests.Timeout as e:
+        print("SYCHEVESTNIK TIMEOUT:", repr(e), flush=True)
+        return {
+            "success": False,
+            "stage": "request_timeout",
+            "error": str(e),
+        }, 504
+    except Exception as e:
+        print("SYCHEVESTNIK ERROR:", repr(e), flush=True)
+        return {
+            "success": False,
+            "stage": "generation_or_send",
+            "error": str(e),
+        }, 500
 
 
 @app.post("/vk")
