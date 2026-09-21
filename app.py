@@ -157,7 +157,7 @@ def build_digest(messages):
                 "content": "Переписка за последние 12 часов:\n\n" + transcript,
             },
         ],
-        "temperature": 0.8,
+        "temperature": 0.9,
         "max_tokens": 500,
     }
 
@@ -425,7 +425,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.6-lively-dots-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.6.1-lively-dots-temp-0.9-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
