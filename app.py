@@ -140,7 +140,7 @@ def build_digest(messages):
 Не добавляй вступление, заключение, пояснения или метакомментарии."""
 
     request_body = {
-        "model": "google/gemma-4-26b-a4b-it:free",
+        "model": None,
         "messages": [
             {"role": "system", "content": system_prompt},
             {
@@ -152,11 +152,19 @@ def build_digest(messages):
         "max_tokens": 500,
     }
 
+    models = [
+        "google/gemma-4-26b-a4b-it:free",
+        "google/gemma-4-31b-it:free",
+    ]
     last_error = None
 
-    for attempt in range(1, 3):
+    for attempt, model in enumerate(models, start=1):
         try:
-            print(f"OPENROUTER ATTEMPT {attempt}/2", flush=True)
+            request_body["model"] = model
+            print(
+                f"OPENROUTER ATTEMPT {attempt}/{len(models)} model={model}",
+                flush=True,
+            )
 
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -167,6 +175,17 @@ def build_digest(messages):
                 json=request_body,
                 timeout=45,
             )
+
+            if response.status_code == 429:
+                last_error = RuntimeError(
+                    f"{model}: OpenRouter rate limit 429"
+                )
+                print(
+                    f"OPENROUTER RATE LIMITED model={model}, switching model",
+                    flush=True,
+                )
+                continue
+
             response.raise_for_status()
             data = response.json()
 
@@ -237,11 +256,14 @@ def build_digest(messages):
                 flush=True,
             )
 
-            if attempt < 2:
-                print("OPENROUTER RETRYING ONCE", flush=True)
+            if attempt < len(models):
+                print(
+                    "OPENROUTER SWITCHING TO FALLBACK MODEL",
+                    flush=True,
+                )
 
     raise RuntimeError(
-        "OpenRouter failed after 2 attempts: "
+        "OpenRouter failed on primary and fallback models: "
         + str(last_error or "unknown error")
     )
 
@@ -394,7 +416,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.3-gemma-fixed-prompt-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.4-model-fallback-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
