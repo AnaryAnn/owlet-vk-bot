@@ -15,7 +15,7 @@ GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
 DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-SYCHEVESTNIK_PEER_ID = 2000000001
+SYCHEVESTNIK_PEER_ID = 2000000002
 MORNING_PHOTO = "photo-241605282_457239021"
 EVENING_PHOTO = "photo-241605282_457239020"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
@@ -163,7 +163,7 @@ def build_digest(messages):
                 "content": "Переписка за последние 12 часов:\n\n" + transcript,
             },
         ],
-        "temperature": 0.9,
+        "temperature": 0.8,
         "max_tokens": 800,
     }
 
@@ -428,7 +428,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.6.7-lively-dots-temp-0.9-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.7 FINAL-lively-dots-temp-0.9-test-peer-2000000002"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
