@@ -162,7 +162,7 @@ def build_digest(messages):
     }
 
     models = [
-        "dots-studio/dots-3-note-preview-20260813:free",
+        "openai/gpt-oss-120b:free",
         "google/gemma-4-31b-it:free",
     ]
     last_error = None
@@ -425,7 +425,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.6.4-lively-dots-temp-0.9-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.6.5-lively-dots-temp-0.9-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
