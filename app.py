@@ -102,6 +102,7 @@ def build_digest(messages):
         useful.append(f"{name}: {text}")
 
     if not useful:
+        print(f"OPENROUTER OK: {model}", flush=True)
         return (
             "📰 Сычевестник\n\n"
             "За последние 12 часов Робосычик не нашёл достаточно "
@@ -161,10 +162,7 @@ def build_digest(messages):
         "max_tokens": 500,
     }
 
-    models = [
-        "openai/gpt-oss-120b:free",
-        "google/gemma-4-31b-it:free",
-    ]
+    models = ["openai/gpt-oss-120b:free", "dots-studio/dots-3-note-preview-20260813:free", "google/gemma-4-31b-it:free"]
     last_error = None
 
     for attempt, model in enumerate(models, start=1):
@@ -272,7 +270,7 @@ def build_digest(messages):
                 )
 
     raise RuntimeError(
-        "OpenRouter failed on primary and fallback models: "
+        "OpenRouter failed on all configured models: "
         + str(last_error or "unknown error")
     )
 
@@ -425,7 +423,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.6.5-lively-dots-temp-0.9-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.6.6-lively-dots-temp-0.9-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
