@@ -77,8 +77,8 @@ def extract_final_digest(content):
             text = text[:pos].rstrip()
 
     # VK does not need an excessively long fallback response.
-    if len(text) > 1800:
-        text = text[:1800].rsplit("\n", 1)[0].rstrip()
+    if len(text) > 2400:
+        text = text[:2400].rsplit("\n", 1)[0].rstrip()
 
     return text
 
@@ -102,7 +102,6 @@ def build_digest(messages):
         useful.append(f"{name}: {text}")
 
     if not useful:
-        print(f"OPENROUTER OK: {model}", flush=True)
         return (
             "📰 Сычевестник\n\n"
             "За последние 12 часов Робосычик не нашёл достаточно "
@@ -122,7 +121,10 @@ def build_digest(messages):
 Никогда не пиши фразы вроде Let's craft, Line1, Line2, space=, approximate, make sure, we need to.
 
 Используй только факты из переданной переписки. Ничего не выдумывай.
-Выбери 3-6 действительно содержательных событий.
+Старайся выбрать 4-6 действительно содержательных событий.
+Если в переписке есть минимум 4 содержательные темы, ОБЯЗАТЕЛЬНО дай минимум 4 пункта.
+Не объединяй несколько разных тем в один пункт только ради краткости.
+Если содержательных тем меньше четырех, не выдумывай недостающие.
 Пропускай тестовые сообщения, односложные реплики и технический шум, если они не важны для смысла разговора.
 Стиль Робосычика: живой, доброжелательный, слегка озорной и лаконичный.
 Робосычик любит сов, мармеладных мышей, вышивку, крестики, Совиную академию и расчеты.
@@ -134,6 +136,8 @@ def build_digest(messages):
 Иногда уместны шутки про мармеладных мышей, крестики, вышивальные запасы, факультет, Совиную академию и вычисления Робосычика.
 Не используй длинное тире.
 Каждый пункт должен быть понятен человеку, который не читал чат.
+Ориентир для обычного выпуска: примерно 700-1300 знаков вместе с пунктами и финальной репликой.
+Не сокращай хороший материал до одного-двух пунктов, если в переписке есть больше содержательных событий.
 
 Формат:
 📰 Сычевестник
@@ -141,8 +145,9 @@ def build_digest(messages):
 • событие 1
 • событие 2
 • событие 3
+• событие 4
 
-При необходимости добавь еще до трех пунктов.
+Обычно делай 4-6 пунктов. Каждый пункт 1-2 предложения, достаточно подробный, чтобы было понятно, что именно обсуждали.
 После пунктов МОЖНО добавить одну очень короткую финальную реплику Робосычика в его стиле, если она действительно смешная и подходит выпуску.
 Пример характера финальной реплики: Робосычик всё записал. Мыши предупреждены. 🤖🦉
 Не копируй пример каждый раз, придумывай разные финальные реплики.
@@ -159,7 +164,7 @@ def build_digest(messages):
             },
         ],
         "temperature": 0.9,
-        "max_tokens": 500,
+        "max_tokens": 800,
     }
 
     models = ["openai/gpt-oss-120b:free", "dots-studio/dots-3-note-preview-20260813:free", "google/gemma-4-31b-it:free"]
@@ -354,7 +359,7 @@ def save_chat_message_background(msg, event_id):
 def build_scheduled_digest(messages, edition):
     digest = build_digest(messages)
     title = "🌅 Утренний Сычевестник" if edition == "morning" else "🌙 Вечерний Сычевестник"
-    digest = re.sub(r"^📰\\s*(?:\\*\\*)?Сычевестник(?:\\*\\*)?", title, digest.strip(), count=1, flags=re.IGNORECASE)
+    digest = re.sub(r"^📰\s*(?:\*\*)?Сычевестник(?:\*\*)?", title, digest.strip(), count=1, flags=re.IGNORECASE)
     if not digest.startswith(title):
         digest = title + "\n\n" + digest
     return digest
@@ -423,7 +428,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.6.6-lively-dots-temp-0.9-test-peer-2000000001"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.6.7-lively-dots-temp-0.9-test-peer-2000000001"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
