@@ -76,9 +76,39 @@ def extract_final_digest(content):
         if pos != -1:
             text = text[:pos].rstrip()
 
-    # VK does not need an excessively long fallback response.
-    if len(text) > 2400:
-        text = text[:2400].rsplit("\n", 1)[0].rstrip()
+    # Безопасный предел для сообщения VK.
+    # Если выпуск длиннее, убираем только целые последние пункты.
+    VK_SAFE_LIMIT = 3800
+    if len(text) > VK_SAFE_LIMIT:
+        bullets = list(re.finditer(r"(?m)^•\s+", text))
+        cut_positions = [m.start() for m in bullets if m.start() <= VK_SAFE_LIMIT]
+
+        # Ищем последний пункт, который уже не помещается целиком.
+        cut_at = None
+        for m in bullets:
+            if m.start() > VK_SAFE_LIMIT:
+                cut_at = m.start()
+                break
+
+        if cut_at is not None:
+            text = text[:cut_at].rstrip()
+        else:
+            # Если один последний пункт получился аномально длинным,
+            # режем только по завершённому предложению.
+            safe = text[:VK_SAFE_LIMIT]
+            ends = [
+                safe.rfind(". "),
+                safe.rfind("! "),
+                safe.rfind("? "),
+                safe.rfind(".\n"),
+                safe.rfind("!\n"),
+                safe.rfind("?\n"),
+            ]
+            end = max(ends)
+            if end >= 0:
+                text = safe[:end + 1].rstrip()
+            else:
+                text = safe.rsplit(" ", 1)[0].rstrip()
 
     return text
 
@@ -358,7 +388,7 @@ def save_chat_message_background(msg, event_id):
 
 def build_scheduled_digest(messages, edition):
     digest = build_digest(messages)
-    title = "🌅 Утренний Сычевестник" if edition == "morning" else "🌙 Вечерний Сычевестник"
+    title = "🌅 Утренний #сычевестник" if edition == "morning" else "🌙 Вечерний #сычевестник"
     digest = re.sub(r"^📰\s*(?:\*\*)?Сычевестник(?:\*\*)?", title, digest.strip(), count=1, flags=re.IGNORECASE)
     if not digest.startswith(title):
         digest = title + "\n\n" + digest
@@ -428,7 +458,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.7 FINAL-lively-dots-temp-0.9-test-peer-2000000002"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.7.3 FINAL-lively-dots-temp-0.9-test-peer-2000000002"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
