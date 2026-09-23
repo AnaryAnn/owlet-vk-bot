@@ -76,39 +76,7 @@ def extract_final_digest(content):
         if pos != -1:
             text = text[:pos].rstrip()
 
-    # Безопасный предел для сообщения VK.
-    # Если выпуск длиннее, убираем только целые последние пункты.
-    VK_SAFE_LIMIT = 3800
-    if len(text) > VK_SAFE_LIMIT:
-        bullets = list(re.finditer(r"(?m)^•\s+", text))
-        cut_positions = [m.start() for m in bullets if m.start() <= VK_SAFE_LIMIT]
-
-        # Ищем последний пункт, который уже не помещается целиком.
-        cut_at = None
-        for m in bullets:
-            if m.start() > VK_SAFE_LIMIT:
-                cut_at = m.start()
-                break
-
-        if cut_at is not None:
-            text = text[:cut_at].rstrip()
-        else:
-            # Если один последний пункт получился аномально длинным,
-            # режем только по завершённому предложению.
-            safe = text[:VK_SAFE_LIMIT]
-            ends = [
-                safe.rfind(". "),
-                safe.rfind("! "),
-                safe.rfind("? "),
-                safe.rfind(".\n"),
-                safe.rfind("!\n"),
-                safe.rfind("?\n"),
-            ]
-            end = max(ends)
-            if end >= 0:
-                text = safe[:end + 1].rstrip()
-            else:
-                text = safe.rsplit(" ", 1)[0].rstrip()
+    # Ничего не обрезаем здесь. Полный текст дайджеста сохраняется целиком.
 
     return text
 
@@ -194,7 +162,7 @@ def build_digest(messages):
             },
         ],
         "temperature": 0.8,
-        "max_tokens": 800,
+        "max_tokens": 1600,
     }
 
     models = ["openai/gpt-oss-120b:free", "dots-studio/dots-3-note-preview-20260813:free", "google/gemma-4-31b-it:free"]
@@ -241,6 +209,16 @@ def build_digest(messages):
 
             message = choices[0].get("message") or {}
             content = (message.get("content") or "").strip()
+            finish_reason = choices[0].get("finish_reason")
+
+            # Если модель упёрлась в лимит генерации, не отправляем обрубок.
+            # Пробуем следующую модель из списка fallback.
+            if finish_reason in ("length", "max_tokens"):
+                print(
+                    f"OPENROUTER TRUNCATED OUTPUT attempt={attempt} finish_reason={finish_reason}",
+                    flush=True,
+                )
+                raise RuntimeError("OpenRouter truncated digest by token limit")
 
             if not content:
                 safe_debug = {
@@ -309,31 +287,68 @@ def build_digest(messages):
         + str(last_error or "unknown error")
     )
 
+def split_vk_message(text, limit=3900):
+    """Делит длинное сообщение VK на части без потери текста."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return [text]
+
+    parts = []
+    rest = text
+    while len(rest) > limit:
+        chunk = rest[:limit]
+
+        # Сначала стараемся делить между абзацами или пунктами.
+        cut = chunk.rfind("\n\n")
+        if cut < int(limit * 0.55):
+            cut = chunk.rfind("\n")
+        if cut < int(limit * 0.55):
+            cut = chunk.rfind(" ")
+        if cut <= 0:
+            cut = limit
+
+        part = rest[:cut].rstrip()
+        if part:
+            parts.append(part)
+        rest = rest[cut:].lstrip()
+
+    if rest:
+        parts.append(rest)
+    return parts
+
+
 def vk_send(peer_id, text, attachment=None):
-    data = {
-        "access_token": VK_TOKEN,
-        "v": "5.199",
-        "peer_id": peer_id,
-        "random_id": random.randint(1, 2147483647),
-        "message": text,
-    }
-    if attachment:
-        data["attachment"] = attachment
+    chunks = split_vk_message(text)
+    last_result = None
 
-    r = requests.post(
-        "https://api.vk.com/method/messages.send",
-        data=data,
-        timeout=15,
-    )
-    r.raise_for_status()
+    for index, chunk in enumerate(chunks):
+        data = {
+            "access_token": VK_TOKEN,
+            "v": "5.199",
+            "peer_id": peer_id,
+            "random_id": random.randint(1, 2147483647),
+            "message": chunk,
+        }
+        # Картинку прикрепляем только к первой части выпуска.
+        if attachment and index == 0:
+            data["attachment"] = attachment
 
-    result = r.json()
-    if result.get("error"):
-        raise RuntimeError(
-            "VK messages.send error: " +
-            str(result["error"].get("error_msg", result["error"]))
+        r = requests.post(
+            "https://api.vk.com/method/messages.send",
+            data=data,
+            timeout=15,
         )
-    return result
+        r.raise_for_status()
+
+        result = r.json()
+        if result.get("error"):
+            raise RuntimeError(
+                "VK messages.send error: " +
+                str(result["error"].get("error_msg", result["error"]))
+            )
+        last_result = result
+
+    return last_result or {"response": None}
 
 def vk_get_user(user_id):
     r = requests.get("https://api.vk.com/method/users.get", params={
@@ -458,7 +473,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.7.3 FINAL-lively-dots-temp-0.9-test-peer-2000000002"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.7.4 no-digest-cut-temp-0.8-peer-2000000002"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
