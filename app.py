@@ -2,6 +2,8 @@ import os
 import re
 import random
 import threading
+import math
+import time
 import requests
 from flask import Flask, request, Response
 
@@ -31,11 +33,30 @@ def google_post(payload):
 
 
 def google_get(params=None):
+    """GET к основному Google Apps Script с повтором при холодном старте."""
     params = dict(params or {})
     params["password"] = GOOGLE_SCRIPT_PASSWORD
-    r = requests.get(GOOGLE_SCRIPT_URL, params=params, timeout=15)
-    r.raise_for_status()
-    return r.json()
+
+    last_error = None
+    for attempt, read_timeout in enumerate((25, 45), start=1):
+        try:
+            r = requests.get(
+                GOOGLE_SCRIPT_URL,
+                params=params,
+                timeout=(5, read_timeout),
+            )
+            r.raise_for_status()
+            return r.json()
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            print(
+                f"GOOGLE GET RETRY {attempt}/2 action={params.get('action')}: {exc}",
+                flush=True,
+            )
+            if attempt < 2:
+                time.sleep(1.5)
+
+    raise last_error or RuntimeError("Google Apps Script request failed")
 
 
 def _num(value):
@@ -56,14 +77,23 @@ def build_weekly_stats():
     if not stats.get("success"):
         raise RuntimeError(stats.get("error", "Не удалось получить статистику"))
 
-    participants_data = google_get({"action": "participants"})
-    if not participants_data.get("success"):
-        participants_data = {}
-
     records = stats.get("currentRecords") or []
 
+    # Новая версия API отдаёт участников вместе со статистикой, поэтому обычно
+    # Робосычик делает только один запрос к Google. Старый API поддерживается
+    # через запасной запрос participants.
+    participants = stats.get("participants") or []
+    participants_data = {}
+
+    if not participants:
+        try:
+            participants_data = google_get({"action": "participants"})
+            if participants_data.get("success"):
+                participants = participants_data.get("participants") or []
+        except Exception as exc:
+            print("PARTICIPANTS FALLBACK ERROR:", repr(exc), flush=True)
+
     # Если API отдаёт статусы, считаем персональные показатели только по активным.
-    participants = participants_data.get("participants") or []
     active_names = set()
     if participants:
         for p in participants:
@@ -586,9 +616,25 @@ def generate_digest_background(peer_id):
             print("BACKGROUND DIGEST SEND ERROR:", repr(send_error))
 
 
+def generate_stats_background(peer_id):
+    try:
+        message = build_weekly_stats()
+        vk_send(peer_id, message)
+    except Exception as e:
+        print("STATS ERROR:", repr(e), flush=True)
+        try:
+            vk_send(
+                peer_id,
+                "🦉 Не удалось получить статистику. "
+                "Робосычик записал ошибку в журнал 🤖"
+            )
+        except Exception as send_error:
+            print("STATS SEND ERROR:", repr(send_error), flush=True)
+
+
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.8.0-weekly-stats"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.8.1-weekly-stats-retry"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -676,18 +722,11 @@ def vk_callback():
             return Response("ok")
 
         if payload.lower() == "статистика":
-            try:
-                vk_send(peer_id, build_weekly_stats())
-            except Exception as e:
-                print("STATS ERROR:", repr(e), flush=True)
-                try:
-                    vk_send(
-                        peer_id,
-                        "🦉 Не удалось получить статистику. "
-                        "Робосычик записал ошибку в журнал 🤖"
-                    )
-                except Exception as send_error:
-                    print("STATS SEND ERROR:", repr(send_error), flush=True)
+            threading.Thread(
+                target=generate_stats_background,
+                args=(peer_id,),
+                daemon=True,
+            ).start()
             return Response("ok")
 
         if payload.lower() == "тест буфера":
