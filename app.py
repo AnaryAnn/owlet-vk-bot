@@ -29,6 +29,121 @@ def google_post(payload):
     r.raise_for_status()
     return r.json()
 
+
+def google_get(params=None):
+    params = dict(params or {})
+    params["password"] = GOOGLE_SCRIPT_PASSWORD
+    r = requests.get(GOOGLE_SCRIPT_URL, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def _num(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_num(value):
+    n = _num(value)
+    return str(int(n)) if n.is_integer() else f"{n:g}"
+
+
+def build_weekly_stats():
+    """Собирает статистику текущей недели из основного Google Apps Script."""
+    stats = google_get({"action": "stats"})
+    if not stats.get("success"):
+        raise RuntimeError(stats.get("error", "Не удалось получить статистику"))
+
+    participants_data = google_get({"action": "participants"})
+    if not participants_data.get("success"):
+        participants_data = {}
+
+    records = stats.get("currentRecords") or []
+
+    # Если API отдаёт статусы, считаем персональные показатели только по активным.
+    participants = participants_data.get("participants") or []
+    active_names = set()
+    if participants:
+        for p in participants:
+            name = str(p.get("name") or "").strip()
+            status = str(p.get("status") or "активен").strip().lower()
+            if name and status != "выбыл":
+                active_names.add(name)
+
+    if active_names:
+        active_records = [
+            r for r in records
+            if str(r.get("name") or "").strip() in active_names
+        ]
+        active_count = len(active_names)
+    else:
+        active_records = records
+        active_count = int(
+            stats.get("activePeopleCount")
+            or participants_data.get("activePeopleCount")
+            or stats.get("peopleCount")
+            or participants_data.get("peopleCount")
+            or 0
+        )
+
+    # Отчёт считаем сданным, если у записи есть отметка времени обновления.
+    submitted = [
+        r for r in active_records
+        if str(r.get("updated") or "").strip()
+    ]
+
+    completed = sum(
+        1 for r in submitted
+        if _num(r.get("fact")) >= _num(r.get("plan"))
+    )
+    exceeded = sum(
+        1 for r in submitted
+        if _num(r.get("fact")) > _num(r.get("plan"))
+    )
+
+    total_plan = sum(_num(r.get("plan")) for r in active_records)
+    total_fact = sum(_num(r.get("fact")) for r in active_records)
+
+    goal_raw = stats.get("teamGoal")
+    has_goal = goal_raw not in (None, "")
+    goal = _num(goal_raw) if has_goal else None
+
+    if goal is None:
+        goal_percent = None
+        add_per_person = None
+    elif goal <= 0:
+        goal_percent = 100.0 if total_fact >= goal else 0.0
+        add_per_person = 0
+    else:
+        goal_percent = total_fact / goal * 100
+        shortage = max(0, goal - total_fact)
+        add_per_person = math.ceil(shortage / active_count) if active_count else 0
+
+    week = stats.get("currentWeek") or {}
+    start = str(week.get("startDisplay") or week.get("start") or "")
+    end = str(week.get("endDisplay") or week.get("end") or "")
+    period = f"{start} - {end}" if start or end else "текущая неделя"
+
+    goal_text = _fmt_num(goal) if goal is not None else "не задана"
+    percent_text = f"{goal_percent:.1f}%".replace(".0%", "%") if goal_percent is not None else "нет цели"
+    add_text = str(add_per_person) if add_per_person is not None else "не считается, пока не задана цель"
+
+    return (
+        "📊 Статистика мохноногих сычиков\n"
+        f"Неделя: {period}\n\n"
+        f"🦉 Активных сычиков: {active_count}\n"
+        f"📝 Сдали отчёт: {len(submitted)}\n"
+        f"✅ Выполнили свой план: {completed}\n"
+        f"🚀 Перевыполнили план: {exceeded}\n\n"
+        f"🐭 План: {_fmt_num(total_plan)}\n"
+        f"🐭 Факт: {_fmt_num(total_fact)}\n"
+        f"🎯 Цель: {goal_text}\n"
+        f"📈 Цель выполнена на: {percent_text}\n"
+        f"➕ Нужно добавить каждому активному сычику: {add_text} 🐭"
+    )
+
 def digest_post(payload, timeout=12):
     if not DIGEST_SCRIPT_URL or not DIGEST_SCRIPT_PASSWORD:
         raise RuntimeError("Digest storage is not configured")
@@ -473,7 +588,7 @@ def generate_digest_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.7.4 no-digest-cut-temp-0.8-peer-2000000002"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.8.0-weekly-stats"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -558,6 +673,21 @@ def vk_callback():
                 daemon=True,
             ).start()
 
+            return Response("ok")
+
+        if payload.lower() == "статистика":
+            try:
+                vk_send(peer_id, build_weekly_stats())
+            except Exception as e:
+                print("STATS ERROR:", repr(e), flush=True)
+                try:
+                    vk_send(
+                        peer_id,
+                        "🦉 Не удалось получить статистику. "
+                        "Робосычик записал ошибку в журнал 🤖"
+                    )
+                except Exception as send_error:
+                    print("STATS SEND ERROR:", repr(send_error), flush=True)
             return Response("ok")
 
         if payload.lower() == "тест буфера":
