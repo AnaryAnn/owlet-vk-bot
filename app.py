@@ -18,6 +18,7 @@ DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
 DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
+STATS_PEER_ID = 2000000002
 MORNING_PHOTO = "photo-241605282_457239021"
 EVENING_PHOTO = "photo-241605282_457239020"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
@@ -647,6 +648,27 @@ def generate_digest_background(peer_id):
             print("BACKGROUND DIGEST SEND ERROR:", repr(send_error))
 
 
+def generate_scheduled_stats():
+    peer_id = STATS_PEER_ID
+    print("WEEKLY STATS START:", "peer_id=", peer_id, flush=True)
+
+    message = build_weekly_stats()
+    vk_result = vk_send(peer_id, message)
+
+    print(
+        "WEEKLY STATS SENT:",
+        "peer_id=", peer_id,
+        "vk_response=", vk_result.get("response"),
+        flush=True,
+    )
+
+    return {
+        "success": True,
+        "peer_id": peer_id,
+        "vk_response": vk_result.get("response"),
+    }
+
+
 def generate_stats_background(peer_id):
     try:
         message = build_weekly_stats()
@@ -665,7 +687,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.8.2-weekly-stats-dedupe-totals"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.9.0-scheduled-stats"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -706,6 +728,38 @@ def sychevestnik_schedule():
         }, 504
     except Exception as e:
         print("SYCHEVESTNIK ERROR:", repr(e), flush=True)
+        return {
+            "success": False,
+            "stage": "generation_or_send",
+            "error": str(e),
+        }, 500
+
+
+@app.post("/statistics-schedule")
+def statistics_schedule():
+    supplied_secret = (
+        request.headers.get("X-Schedule-Secret", "").strip()
+        or request.args.get("secret", "").strip()
+    )
+
+    if not SCHEDULE_SECRET or supplied_secret != SCHEDULE_SECRET:
+        return {
+            "success": False,
+            "stage": "auth",
+            "error": "forbidden",
+        }, 403
+
+    try:
+        return generate_scheduled_stats(), 200
+    except requests.Timeout as e:
+        print("WEEKLY STATS TIMEOUT:", repr(e), flush=True)
+        return {
+            "success": False,
+            "stage": "request_timeout",
+            "error": str(e),
+        }, 504
+    except Exception as e:
+        print("WEEKLY STATS ERROR:", repr(e), flush=True)
         return {
             "success": False,
             "stage": "generation_or_send",
