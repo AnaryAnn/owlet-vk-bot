@@ -24,6 +24,33 @@ SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
 
+_COMMAND_EVENT_LOCK = threading.Lock()
+_COMMAND_EVENT_IDS = {}
+_COMMAND_EVENT_TTL = 300
+
+def command_event_once(event_id):
+    """Возвращает True только для первой обработки event_id в этом процессе."""
+    if not event_id:
+        return True
+
+    now = time.time()
+    key = str(event_id)
+
+    with _COMMAND_EVENT_LOCK:
+        expired = [
+            eid for eid, ts in _COMMAND_EVENT_IDS.items()
+            if now - ts > _COMMAND_EVENT_TTL
+        ]
+        for eid in expired:
+            _COMMAND_EVENT_IDS.pop(eid, None)
+
+        if key in _COMMAND_EVENT_IDS:
+            return False
+
+        _COMMAND_EVENT_IDS[key] = now
+        return True
+
+
 def google_post(payload):
     payload = dict(payload)
     payload["password"] = GOOGLE_SCRIPT_PASSWORD
@@ -133,8 +160,12 @@ def build_weekly_stats():
         if _num(r.get("fact")) > _num(r.get("plan"))
     )
 
-    total_plan = sum(_num(r.get("plan")) for r in active_records)
-    total_fact = sum(_num(r.get("fact")) for r in active_records)
+    # Командные план и факт считаем по всем записям текущей недели.
+    # Если участник выбыл уже после сдачи отчёта, его пойманные мыши не исчезают
+    # из командного результата. Статус влияет только на персональные счётчики
+    # и на делитель "сколько добавить каждому активному".
+    total_plan = sum(_num(r.get("plan")) for r in records)
+    total_fact = sum(_num(r.get("fact")) for r in records)
 
     goal_raw = stats.get("teamGoal")
     has_goal = goal_raw not in (None, "")
@@ -634,7 +665,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.8.1-weekly-stats-retry"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.8.2-weekly-stats-dedupe-totals"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -722,6 +753,9 @@ def vk_callback():
             return Response("ok")
 
         if payload.lower() == "статистика":
+            if not command_event_once(event_id):
+                return Response("ok")
+
             threading.Thread(
                 target=generate_stats_background,
                 args=(peer_id,),
