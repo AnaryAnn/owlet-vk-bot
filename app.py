@@ -339,10 +339,15 @@ def build_digest(messages):
             },
         ],
         "temperature": 0.8,
-        "max_tokens": 1600,
+        "max_tokens": 2400,
     }
 
-    models = ["openai/gpt-oss-120b:free", "dots-studio/dots-3-note-preview-20260813:free", "google/gemma-4-31b-it:free"]
+    models = [
+        "dots-studio/dots-3-note-preview-20260813:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemma-4-31b-it:free",
+    ]
     last_error = None
 
     for attempt, model in enumerate(models, start=1):
@@ -718,7 +723,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.9.1-digest-retry"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.9.2-digest-retry"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
