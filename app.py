@@ -599,14 +599,45 @@ def generate_scheduled_digest(edition):
         flush=True,
     )
 
-    result = digest_post(
-        {
-            "action": "getMessages",
-            "peerId": str(peer_id),
-            "hours": 12,
-        },
-        timeout=12,
-    )
+    # Google Apps Script иногда отвечает медленно из-за холодного старта.
+    # Не отменяем весь выпуск после первого ReadTimeout: пробуем до 3 раз.
+    result = None
+    last_fetch_error = None
+    fetch_timeouts = (12, 20, 30)
+
+    for attempt, fetch_timeout in enumerate(fetch_timeouts, start=1):
+        try:
+            print(
+                f"SYCHEVESTNIK FETCH attempt {attempt}/{len(fetch_timeouts)} "
+                f"timeout={fetch_timeout}s",
+                flush=True,
+            )
+            result = digest_post(
+                {
+                    "action": "getMessages",
+                    "peerId": str(peer_id),
+                    "hours": 12,
+                },
+                timeout=fetch_timeout,
+            )
+            print(
+                f"SYCHEVESTNIK FETCH OK attempt {attempt}/{len(fetch_timeouts)}",
+                flush=True,
+            )
+            break
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_fetch_error = exc
+            print(
+                f"SYCHEVESTNIK FETCH TIMEOUT attempt {attempt}/{len(fetch_timeouts)}: {exc}",
+                flush=True,
+            )
+            if attempt < len(fetch_timeouts):
+                time.sleep(1.5)
+
+    if result is None:
+        raise last_fetch_error or RuntimeError(
+            "Digest storage did not respond after 3 attempts"
+        )
     messages = result.get("messages") or []
     print("SYCHEVESTNIK BUFFER:", len(messages), "messages", flush=True)
 
@@ -687,7 +718,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.9.0-scheduled-stats"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.9.1-digest-retry"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
