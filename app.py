@@ -20,7 +20,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
 STATS_PEER_ID = 2000000002
 MORNING_PHOTO = "photo-241605282_457239021"
-EVENING_PHOTO = "photo-241605282_457239023"
+EVENING_PHOTO = "photo-241605282_457239022"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
@@ -532,6 +532,123 @@ def vk_send(peer_id, text, attachment=None):
 
     return last_result or {"response": None}
 
+
+def vk_get_chat_members(peer_id):
+    """Получает актуальных пользователей беседы VK. Ничего не меняет."""
+    r = requests.get(
+        "https://api.vk.com/method/messages.getConversationMembers",
+        params={
+            "access_token": VK_TOKEN,
+            "v": "5.199",
+            "peer_id": peer_id,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("error"):
+        raise RuntimeError(
+            "VK getConversationMembers error: "
+            + str(data["error"].get("error_msg", data["error"]))
+        )
+
+    response = data.get("response") or {}
+    profiles = {
+        str(p.get("id")): p
+        for p in (response.get("profiles") or [])
+        if p.get("id")
+    }
+
+    members = []
+    for item in response.get("items") or []:
+        member_id = item.get("member_id")
+        if not member_id or int(member_id) <= 0:
+            continue
+
+        profile = profiles.get(str(member_id), {})
+        name = " ".join(
+            x for x in (
+                str(profile.get("first_name") or "").strip(),
+                str(profile.get("last_name") or "").strip(),
+            )
+            if x
+        ).strip()
+
+        members.append({
+            "vkId": str(member_id),
+            "name": name or str(member_id),
+            "isAdmin": bool(item.get("is_admin")),
+            "isOwner": bool(item.get("is_owner")),
+        })
+
+    return members
+
+
+def build_participants_sync_preview(peer_id):
+    """DRY RUN: сравнивает VK и лист Участники, ничего не изменяя."""
+    vk_members = vk_get_chat_members(peer_id)
+
+    table = google_get({"action": "participants"})
+    if not table.get("success"):
+        raise RuntimeError(table.get("error", "Не удалось получить лист Участники"))
+
+    table_members = table.get("participants") or []
+
+    vk_by_id = {
+        str(p.get("vkId") or "").strip(): p
+        for p in vk_members
+        if str(p.get("vkId") or "").strip()
+    }
+    table_by_id = {
+        str(p.get("vkId") or "").strip(): p
+        for p in table_members
+        if str(p.get("vkId") or "").strip()
+    }
+
+    new_ids = sorted(set(vk_by_id) - set(table_by_id))
+    left_ids = sorted(set(table_by_id) - set(vk_by_id))
+    no_vk_id = [
+        p for p in table_members
+        if not str(p.get("vkId") or "").strip()
+    ]
+
+    lines = [
+        "🦉 Проверка состава факультета",
+        "",
+        f"В VK: {len(vk_by_id)}",
+        f"В таблице «Участники»: {len(table_by_id)}",
+    ]
+
+    if new_ids:
+        lines += ["", "➕ Новенькие в VK, которых нет в таблице:"]
+        lines += [
+            f"• {vk_by_id[x].get('name') or x} (VK ID {x})"
+            for x in new_ids
+        ]
+
+    if left_ids:
+        lines += ["", "➖ Есть в таблице, но уже нет в VK-чате:"]
+        lines += [
+            f"• {table_by_id[x].get('name') or x} (VK ID {x})"
+            for x in left_ids
+        ]
+
+    if no_vk_id:
+        lines += [
+            "",
+            f"⚠️ Без VK ID в таблице: {len(no_vk_id)}.",
+            "Их автоматически сопоставлять нельзя.",
+        ]
+
+    if not new_ids and not left_ids:
+        lines += ["", "✅ Состав VK и таблицы совпадает по VK ID."]
+
+    lines += [
+        "",
+        "Это тестовая проверка. Робосычик пока ничего не добавляет и не удаляет.",
+    ]
+    return "\n".join(lines)
+
 def vk_get_user(user_id):
     r = requests.get("https://api.vk.com/method/users.get", params={
         "access_token": VK_TOKEN, "v": "5.199", "user_ids": user_id
@@ -723,7 +840,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.9.2-digest-retry"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.0-participants-dry-run"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -840,6 +957,31 @@ def vk_callback():
                 daemon=True,
             ).start()
 
+            return Response("ok")
+
+        if payload.lower() in ("синхронизация", "проверка участников", "участники проверить"):
+            if not command_event_once(event_id):
+                return Response("ok")
+
+            def _participants_preview_job():
+                try:
+                    preview = build_participants_sync_preview(peer_id)
+                    vk_send(peer_id, preview)
+                except Exception as exc:
+                    print("PARTICIPANTS SYNC PREVIEW ERROR:", repr(exc), flush=True)
+                    try:
+                        vk_send(
+                            peer_id,
+                            "🦉 Не удалось проверить состав участников. "
+                            "Ошибка записана в журнал Робосычика 🤖"
+                        )
+                    except Exception as send_exc:
+                        print("PARTICIPANTS PREVIEW SEND ERROR:", repr(send_exc), flush=True)
+
+            threading.Thread(
+                target=_participants_preview_job,
+                daemon=True,
+            ).start()
             return Response("ok")
 
         if payload.lower() == "статистика":
