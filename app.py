@@ -584,70 +584,38 @@ def vk_get_chat_members(peer_id):
     return members
 
 
-def build_participants_sync_preview(peer_id):
-    """DRY RUN: сравнивает VK и лист Участники, ничего не изменяя."""
+def sync_chat_participants(peer_id):
+    """Синхронизирует Участники и текущую неделю с составом VK."""
     vk_members = vk_get_chat_members(peer_id)
+    result = google_post({
+        "action": "syncParticipants",
+        "members": [{"vkId": p["vkId"], "name": p["name"]} for p in vk_members],
+    })
+    if not result.get("success"):
+        raise RuntimeError(result.get("error", "Синхронизация не выполнена"))
 
-    table = google_get({"action": "participants"})
-    if not table.get("success"):
-        raise RuntimeError(table.get("error", "Не удалось получить лист Участники"))
-
-    table_members = table.get("participants") or []
-
-    vk_by_id = {
-        str(p.get("vkId") or "").strip(): p
-        for p in vk_members
-        if str(p.get("vkId") or "").strip()
-    }
-    table_by_id = {
-        str(p.get("vkId") or "").strip(): p
-        for p in table_members
-        if str(p.get("vkId") or "").strip()
-    }
-
-    new_ids = sorted(set(vk_by_id) - set(table_by_id))
-    left_ids = sorted(set(table_by_id) - set(vk_by_id))
-    no_vk_id = [
-        p for p in table_members
-        if not str(p.get("vkId") or "").strip()
-    ]
-
+    added = result.get("added") or []
+    removed = result.get("removed") or []
+    kept = result.get("keptReported") or []
     lines = [
-        "🦉 Проверка состава факультета",
+        "🦉 Синхронизация состава завершена",
         "",
-        f"В VK: {len(vk_by_id)}",
-        f"В таблице «Участники»: {len(table_by_id)}",
+        f"Сейчас в VK: {result.get('vkCount', len(vk_members))}",
+        f"В листе «Участники»: {result.get('participantsCount', '')}",
     ]
-
-    if new_ids:
-        lines += ["", "➕ Новенькие в VK, которых нет в таблице:"]
-        lines += [
-            f"• {vk_by_id[x].get('name') or x} (VK ID {x})"
-            for x in new_ids
-        ]
-
-    if left_ids:
-        lines += ["", "➖ Есть в таблице, но уже нет в VK-чате:"]
-        lines += [
-            f"• {table_by_id[x].get('name') or x} (VK ID {x})"
-            for x in left_ids
-        ]
-
-    if no_vk_id:
-        lines += [
-            "",
-            f"⚠️ Без VK ID в таблице: {len(no_vk_id)}.",
-            "Их автоматически сопоставлять нельзя.",
-        ]
-
-    if not new_ids and not left_ids:
-        lines += ["", "✅ Состав VK и таблицы совпадает по VK ID."]
-
-    lines += [
-        "",
-        "Это тестовая проверка. Робосычик пока ничего не добавляет и не удаляет.",
-    ]
+    if added:
+        lines += ["", "➕ Добавлены новенькие:"]
+        lines += [f"• {p.get('name')}" for p in added]
+    if removed:
+        lines += ["", "➖ Удалены из «Участников»:"]
+        lines += [f"• {p.get('name')}" for p in removed]
+    if kept:
+        lines += ["", "📋 Оставлены в текущей неделе, потому что уже отчитались:"]
+        lines += [f"• {p.get('name')}" for p in kept]
+    if not added and not removed:
+        lines += ["", "✅ Изменений нет, состав уже актуален."]
     return "\n".join(lines)
+
 
 def vk_get_user(user_id):
     r = requests.get("https://api.vk.com/method/users.get", params={
@@ -840,7 +808,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.0-participants-dry-run"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.2-silent-sync"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -965,18 +933,18 @@ def vk_callback():
 
             def _participants_preview_job():
                 try:
-                    preview = build_participants_sync_preview(peer_id)
+                    preview = sync_chat_participants(peer_id)
                     vk_send(peer_id, preview)
                 except Exception as exc:
-                    print("PARTICIPANTS SYNC PREVIEW ERROR:", repr(exc), flush=True)
+                    print("PARTICIPANTS SYNC ERROR:", repr(exc), flush=True)
                     try:
                         vk_send(
                             peer_id,
-                            "🦉 Не удалось проверить состав участников. "
+                            "🦉 Не удалось синхронизировать состав участников. "
                             "Ошибка записана в журнал Робосычика 🤖"
                         )
                     except Exception as send_exc:
-                        print("PARTICIPANTS PREVIEW SEND ERROR:", repr(send_exc), flush=True)
+                        print("PARTICIPANTS SYNC SEND ERROR:", repr(send_exc), flush=True)
 
             threading.Thread(
                 target=_participants_preview_job,
@@ -1047,6 +1015,50 @@ def vk_callback():
     except Exception as e:
         print("VK CALLBACK ERROR:", repr(e))
         return Response("ok")
+
+
+@app.route("/sync-participants-silent", methods=["POST"])
+def sync_participants_silent_route():
+    try:
+        data = request.get_json(silent=True) or {}
+        if str(data.get("secret") or "") != str(SCHEDULE_SECRET or ""):
+            return jsonify({"success": False, "error": "unauthorized"}), 403
+
+        peer_id = int(data.get("peer_id") or SYCHEVESTNIK_PEER_ID)
+        print("PARTICIPANTS SILENT SYNC START:", peer_id, flush=True)
+
+        # Та же рабочая синхронизация, что и у команды в VK.
+        # Возвращаем результат только вызывающему Apps Script, в VK ничего не отправляем.
+        vk_members = vk_get_chat_members(peer_id)
+        result = google_post({
+            "action": "syncParticipants",
+            "members": [
+                {"vkId": p["vkId"], "name": p["name"]}
+                for p in vk_members
+            ],
+        })
+
+        if not result.get("success"):
+            raise RuntimeError(result.get("error", "Синхронизация не выполнена"))
+
+        print(
+            "PARTICIPANTS SILENT SYNC OK:",
+            "vk=", result.get("vkCount"),
+            "participants=", result.get("participantsCount"),
+            "added=", len(result.get("added") or []),
+            "removed=", len(result.get("removed") or []),
+            "keptReported=", len(result.get("keptReported") or []),
+            flush=True,
+        )
+        return jsonify(result), 200
+
+    except Exception as exc:
+        print("PARTICIPANTS SILENT SYNC ERROR:", repr(exc), flush=True)
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
