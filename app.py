@@ -808,7 +808,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.2-silent-sync"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.3-sync-fix"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
