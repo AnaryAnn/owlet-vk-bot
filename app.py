@@ -336,7 +336,7 @@ def build_digest(messages):
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": "Переписка за последние 12 часов:\n\n" + transcript,
+                "content": "Переписка за последние 24 часа:\n\n" + transcript,
             },
         ],
         "temperature": 0.8,
@@ -646,6 +646,14 @@ def save_chat_message(msg, event_id):
     user_id = msg.get("from_id")
     if not text or not user_id or int(user_id) <= 0:
         return
+
+    # Технический отчёт вида "Робосычик <план>,<факт>" не сохраняем
+    # в буфер Сычевестника. Обсуждения и объяснения с таким примером
+    # остаются, потому что фильтр требует полного совпадения сообщения.
+    if PLAIN_REPORT_RE.fullmatch(text):
+        print("DIGEST SKIP PLAIN REPORT:", text, flush=True)
+        return
+
     digest_post({
         "action":"saveMessage",
         "timestamp":int(msg.get("date") or 0),
@@ -668,6 +676,20 @@ def save_chat_message_background(msg, event_id):
     except Exception as e:
         print("BACKGROUND DIGEST SAVE ERROR:", repr(e))
 
+
+
+def filter_digest_messages(messages):
+    filtered = []
+    skipped = 0
+    for item in messages or []:
+        msg_text = str(item.get("text") or "").strip()
+        if PLAIN_REPORT_RE.fullmatch(msg_text):
+            skipped += 1
+            continue
+        filtered.append(item)
+    if skipped:
+        print("SYCHEVESTNIK FILTERED REPORTS:", skipped, flush=True)
+    return filtered
 
 def build_scheduled_digest(messages, edition):
     digest = build_digest(messages)
@@ -707,7 +729,7 @@ def generate_scheduled_digest(edition):
                 {
                     "action": "getMessages",
                     "peerId": str(peer_id),
-                    "hours": 12,
+                    "hours": 24,
                 },
                 timeout=fetch_timeout,
             )
@@ -729,7 +751,7 @@ def generate_scheduled_digest(edition):
         raise last_fetch_error or RuntimeError(
             "Digest storage did not respond after 3 attempts"
         )
-    messages = result.get("messages") or []
+    messages = filter_digest_messages(result.get("messages") or [])
     print("SYCHEVESTNIK BUFFER:", len(messages), "messages", flush=True)
 
     digest = build_scheduled_digest(messages, edition)
@@ -753,9 +775,9 @@ def generate_digest_background(peer_id):
         result = digest_post({
             "action": "getMessages",
             "peerId": str(peer_id),
-            "hours": 12,
+            "hours": 24,
         })
-        messages = result.get("messages") or []
+        messages = filter_digest_messages(result.get("messages") or [])
         digest = build_digest(messages)
         vk_send(peer_id, digest)
     except Exception as e:
@@ -809,7 +831,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.6-newline-fix"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.7-digest-24h-filter"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1010,10 +1032,10 @@ def vk_callback():
 
         if payload.lower() == "тест буфера":
             try:
-                result = digest_post({"action":"getMessages","peerId":str(peer_id),"hours":12})
+                result = digest_post({"action":"getMessages","peerId":str(peer_id),"hours":24})
                 vk_send(peer_id,
                     "🦉 Буфер Робосычика работает!\n\n"
-                    f"В этом чате сохранено сообщений за последние 12 часов: {int(result.get('count',0))}\n"
+                    f"В этом чате сохранено сообщений за последние 24 часа: {int(result.get('count',0))}\n"
                     "Чаты друг с другом не смешиваются 🤖")
             except Exception as e:
                 print("BUFFER TEST ERROR:", repr(e))
