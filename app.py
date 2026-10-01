@@ -24,6 +24,7 @@ EVENING_PHOTO = "photo-241605282_457239022"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
+PLAIN_REPORT_RE = re.compile(r"^\\s*робосычик\\s+(\\d+)\\s*,\\s*(\\d+)\\s*$", re.IGNORECASE)
 
 _COMMAND_EVENT_LOCK = threading.Lock()
 _COMMAND_EVENT_IDS = {}
@@ -808,7 +809,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.3-sync-fix"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.4-plain-report"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -914,6 +915,50 @@ def vk_callback():
             daemon=True,
         ).start()
 
+        # Отчёт без VK-тега:
+        # "Робосычик 10,6", регистр и количество пробелов не важны.
+        # Первое число = план, второе = факт.
+        plain_report = PLAIN_REPORT_RE.match(text)
+        if plain_report:
+            if not command_event_once(event_id):
+                return Response("ok")
+
+            plan, fact = map(int, plain_report.groups())
+            result = google_post({
+                "action": "vkSave",
+                "vkId": str(user_id),
+                "plan": plan,
+                "fact": fact,
+            })
+
+            if result.get("unknownVkUser"):
+                profile = vk_get_user(user_id)
+                bind = google_post({
+                    "action": "vkAutoBind",
+                    "vkId": str(user_id),
+                    "firstName": profile.get("first_name", ""),
+                    "lastName": profile.get("last_name", ""),
+                })
+                if bind.get("success"):
+                    result = google_post({
+                        "action": "vkSave",
+                        "vkId": str(user_id),
+                        "plan": plan,
+                        "fact": fact,
+                    })
+
+            if result.get("success"):
+                mark_event(event_id, user_id, peer_id)
+                vk_send(
+                    peer_id,
+                    f"🦉 Данные сохранены!\\n{result.get('name','')}: "
+                    f"план {plan} 🐭, факт {fact} 🐭",
+                )
+            else:
+                vk_send(peer_id, "Не удалось сохранить данные.")
+
+            return Response("ok")
+
         payload = text_after_bot_tag(text)
         if payload is None:
             return Response("ok")
@@ -1015,6 +1060,47 @@ def vk_callback():
     except Exception as e:
         print("VK CALLBACK ERROR:", repr(e))
         return Response("ok")
+
+
+
+@app.route("/send-owlet-message", methods=["POST"])
+def send_owlet_message_route():
+    try:
+        data = request.get_json(silent=True) or {}
+
+        if str(data.get("secret") or "") != str(SCHEDULE_SECRET or ""):
+            return jsonify({"success": False, "error": "unauthorized"}), 403
+
+        peer_id = int(data.get("peer_id") or SYCHEVESTNIK_PEER_ID)
+        message = str(data.get("text") or "").strip()
+        attachment = str(data.get("attachment") or "").strip()
+
+        if not message and not attachment:
+            return jsonify({
+                "success": False,
+                "error": "Нужен текст или attachment"
+            }), 400
+
+        print(
+            "MANUAL OWLET POST:",
+            "peer_id=", peer_id,
+            "text_len=", len(message),
+            "attachment=", attachment,
+            flush=True,
+        )
+
+        vk_send(peer_id, message, attachment=attachment or None)
+
+        return jsonify({
+            "success": True,
+            "peer_id": peer_id,
+            "has_text": bool(message),
+            "attachment": attachment,
+        }), 200
+
+    except Exception as exc:
+        print("MANUAL OWLET POST ERROR:", repr(exc), flush=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 @app.route("/sync-participants-silent", methods=["POST"])
