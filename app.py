@@ -534,6 +534,94 @@ def vk_send(peer_id, text, attachment=None):
     return last_result or {"response": None}
 
 
+
+def vk_send_reliable(peer_id, text, attachment=None, attempts=3):
+    """
+    Надёжная отправка коротких служебных ответов Робосычика.
+    Один random_id сохраняется между повторами, чтобы при сетевом таймауте
+    VK не создал дубликат уже принятого сообщения.
+    """
+    random_id = random.randint(1, 2147483647)
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            print(
+                f"VK CONFIRM ATTEMPT {attempt}/{attempts} "
+                f"peer_id={peer_id} random_id={random_id}",
+                flush=True,
+            )
+
+            data = {
+                "access_token": VK_TOKEN,
+                "v": "5.199",
+                "peer_id": peer_id,
+                "random_id": random_id,
+                "message": str(text or ""),
+            }
+            if attachment:
+                data["attachment"] = attachment
+
+            r = requests.post(
+                "https://api.vk.com/method/messages.send",
+                data=data,
+                timeout=(5, 12),
+            )
+
+            # Для временных HTTP-ошибок пробуем ещё раз.
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                raise RuntimeError(
+                    f"VK HTTP {r.status_code}: {r.text[:300]}"
+                )
+
+            r.raise_for_status()
+            result = r.json()
+
+            if result.get("error"):
+                err = result["error"]
+                code = int(err.get("error_code") or 0)
+                message = err.get("error_msg") or str(err)
+
+                # Временные ошибки VK API.
+                if code in (1, 6, 9, 10, 29):
+                    raise RuntimeError(
+                        f"VK API temporary error {code}: {message}"
+                    )
+
+                raise RuntimeError(
+                    f"VK API error {code}: {message}"
+                )
+
+            print(
+                f"VK CONFIRM OK attempt={attempt} "
+                f"response={result.get('response')}",
+                flush=True,
+            )
+            return result
+
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"VK CONFIRM ERROR attempt={attempt}/{attempts}: {exc!r}",
+                flush=True,
+            )
+            if attempt < attempts:
+                time.sleep(1.2 * attempt)
+
+    print(
+        f"VK CONFIRM FAILED after {attempts} attempts: {last_error!r}",
+        flush=True,
+    )
+    return None
+
+
+def send_report_confirmation_background(peer_id, name, plan, fact):
+    message = (
+        f"🦉 Данные сохранены!\n{name}: "
+        f"план {plan} 🐭, факт {fact} 🐭"
+    )
+    vk_send_reliable(peer_id, message, attempts=3)
+
 def vk_get_chat_members(peer_id):
     """Получает актуальных пользователей беседы VK. Ничего не меняет."""
     r = requests.get(
@@ -831,7 +919,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.7-digest-24h-filter"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.8-reliable-replies"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -971,11 +1059,16 @@ def vk_callback():
 
             if result.get("success"):
                 mark_event(event_id, user_id, peer_id)
-                vk_send(
-                    peer_id,
-                    f"🦉 Данные сохранены!\n{result.get('name','')}: "
-                    f"план {plan} 🐭, факт {fact} 🐭",
+                print(
+                    f"REPORT SAVED: {result.get('name','')} "
+                    f"plan={plan} fact={fact}",
+                    flush=True,
                 )
+                threading.Thread(
+                    target=send_report_confirmation_background,
+                    args=(peer_id, result.get("name", ""), plan, fact),
+                    daemon=True,
+                ).start()
             else:
                 vk_send(peer_id, "Не удалось сохранить данные.")
 
@@ -1072,9 +1165,16 @@ def vk_callback():
 
         if result.get("success"):
             mark_event(event_id, user_id, peer_id)
-            vk_send(peer_id,
-                f"🦉 Данные сохранены!\n{result.get('name','')}: "
-                f"план {plan} 🐭, факт {fact} 🐭")
+            print(
+                f"REPORT SAVED: {result.get('name','')} "
+                f"plan={plan} fact={fact}",
+                flush=True,
+            )
+            threading.Thread(
+                target=send_report_confirmation_background,
+                args=(peer_id, result.get("name", ""), plan, fact),
+                daemon=True,
+            ).start()
         else:
             vk_send(peer_id, "Не удалось сохранить данные.")
 
