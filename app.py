@@ -809,7 +809,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.5-plain-report-fix"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.6-newline-fix"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -951,7 +951,7 @@ def vk_callback():
                 mark_event(event_id, user_id, peer_id)
                 vk_send(
                     peer_id,
-                    f"🦉 Данные сохранены!\\n{result.get('name','')}: "
+                    f"🦉 Данные сохранены!\n{result.get('name','')}: "
                     f"план {plan} 🐭, факт {fact} 🐭",
                 )
             else:
