@@ -758,6 +758,51 @@ def mark_event(event_id, user_id, peer_id):
         "vkId":str(user_id), "peerId":str(peer_id)
     })
 
+
+def mark_event_background(event_id, user_id, peer_id, attempts=3):
+    """
+    Отмечает VK-событие обработанным, не блокируя callback.
+    Сбой Google Apps Script не должен превращать ответ VK в HTTP 500.
+    """
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            print(
+                f"MARK EVENT ATTEMPT {attempt}/{attempts} "
+                f"event_id={event_id}",
+                flush=True,
+            )
+            result = mark_event(event_id, user_id, peer_id)
+            print(
+                f"MARK EVENT OK attempt={attempt} "
+                f"event_id={event_id}",
+                flush=True,
+            )
+            return result
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"MARK EVENT ERROR attempt={attempt}/{attempts}: {exc!r}",
+                flush=True,
+            )
+            if attempt < attempts:
+                time.sleep(1.0 * attempt)
+
+    print(
+        f"MARK EVENT FAILED after {attempts} attempts: {last_error!r}",
+        flush=True,
+    )
+    return None
+
+
+def mark_event_async(event_id, user_id, peer_id):
+    threading.Thread(
+        target=mark_event_background,
+        args=(event_id, user_id, peer_id),
+        daemon=True,
+    ).start()
+
 def save_chat_message_background(msg, event_id):
     try:
         save_chat_message(msg, event_id)
@@ -919,7 +964,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.8-reliable-replies"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.9-nonblocking-mark-event"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1058,7 +1103,7 @@ def vk_callback():
                     })
 
             if result.get("success"):
-                mark_event(event_id, user_id, peer_id)
+                mark_event_async(event_id, user_id, peer_id)
                 print(
                     f"REPORT SAVED: {result.get('name','')} "
                     f"plan={plan} fact={fact}",
@@ -1164,7 +1209,7 @@ def vk_callback():
                 result = google_post({"action":"vkSave","vkId":str(user_id),"plan":plan,"fact":fact})
 
         if result.get("success"):
-            mark_event(event_id, user_id, peer_id)
+            mark_event_async(event_id, user_id, peer_id)
             print(
                 f"REPORT SAVED: {result.get('name','')} "
                 f"plan={plan} fact={fact}",
