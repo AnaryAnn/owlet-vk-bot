@@ -5,7 +5,7 @@ import threading
 import math
 import time
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 
 app = Flask(__name__)
 
@@ -24,7 +24,7 @@ EVENING_PHOTO = "photo-241605282_457239022"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
-PLAIN_REPORT_RE = re.compile(r"^\\s*робосычик\\s+(\\d+)\\s*,\\s*(\\d+)\\s*$", re.IGNORECASE)
+PLAIN_REPORT_RE = re.compile(r"^\s*робосычик\s+(\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
 
 _COMMAND_EVENT_LOCK = threading.Lock()
 _COMMAND_EVENT_IDS = {}
@@ -809,7 +809,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.4-plain-report"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.5-plain-report-fix"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
