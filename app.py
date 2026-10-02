@@ -20,7 +20,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
 STATS_PEER_ID = 2000000002
 MORNING_PHOTO = "photo-241605282_457239021"
-EVENING_PHOTO = "photo-241605282_457239022"
+EVENING_PHOTO = "photo-241605282_457239023"
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
@@ -197,7 +197,7 @@ def build_weekly_stats():
         "📊 Статистика мохноногих сычиков\n"
         f"Неделя: {period}\n\n"
         f"🦉 Активных сычиков: {active_count}\n"
-        f"📝 Сдали отчёт: {len(submitted)}\n"
+        f"📝 Сообщили план и факт: {len(submitted)}\n"
         f"✅ Выполнили свой план: {completed}\n"
         f"🚀 Перевыполнили план: {exceeded}\n\n"
         f"🐭 План: {_fmt_num(total_plan)}\n"
