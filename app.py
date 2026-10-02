@@ -535,7 +535,7 @@ def vk_send(peer_id, text, attachment=None):
 
 
 
-def vk_send_reliable(peer_id, text, attachment=None, attempts=3):
+def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
     """
     Надёжная отправка коротких служебных ответов Робосычика.
     Один random_id сохраняется между повторами, чтобы при сетевом таймауте
@@ -620,7 +620,7 @@ def send_report_confirmation_background(peer_id, name, plan, fact):
         f"🦉 Данные сохранены!\n{name}: "
         f"план {plan} 🐭, факт {fact} 🐭"
     )
-    vk_send_reliable(peer_id, message, attempts=3)
+    vk_send_reliable(peer_id, message, attempts=6)
 
 def vk_get_chat_members(peer_id):
     """Получает актуальных пользователей беседы VK. Ничего не меняет."""
@@ -964,7 +964,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.9-nonblocking-mark-event"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.12-idempotent-reports"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1079,12 +1079,10 @@ def vk_callback():
                 return Response("ok")
 
             plan, fact = map(int, plain_report.groups())
-            result = google_post({
-                "action": "vkSave",
-                "vkId": str(user_id),
-                "plan": plan,
-                "fact": fact,
-            })
+            report_id = f"vk-{event_id}"
+            result = google_save_report(
+                user_id, plan, fact, report_id, attempts=3
+            )
 
             if result.get("unknownVkUser"):
                 profile = vk_get_user(user_id)
@@ -1095,12 +1093,9 @@ def vk_callback():
                     "lastName": profile.get("last_name", ""),
                 })
                 if bind.get("success"):
-                    result = google_post({
-                        "action": "vkSave",
-                        "vkId": str(user_id),
-                        "plan": plan,
-                        "fact": fact,
-                    })
+                    result = google_save_report(
+                        user_id, plan, fact, report_id, attempts=3
+                    )
 
             if result.get("success"):
                 mark_event_async(event_id, user_id, peer_id)
@@ -1196,7 +1191,10 @@ def vk_callback():
             return Response("ok")
 
         plan, fact = map(int, m.groups())
-        result = google_post({"action":"vkSave","vkId":str(user_id),"plan":plan,"fact":fact})
+        report_id = f"vk-{event_id}"
+        result = google_save_report(
+            user_id, plan, fact, report_id, attempts=3
+        )
 
         if result.get("unknownVkUser"):
             profile = vk_get_user(user_id)
@@ -1206,7 +1204,9 @@ def vk_callback():
                 "lastName":profile.get("last_name","")
             })
             if bind.get("success"):
-                result = google_post({"action":"vkSave","vkId":str(user_id),"plan":plan,"fact":fact})
+                result = google_save_report(
+                    user_id, plan, fact, report_id, attempts=3
+                )
 
         if result.get("success"):
             mark_event_async(event_id, user_id, peer_id)
@@ -1270,6 +1270,99 @@ def send_owlet_message_route():
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
+
+
+def google_save_report(vk_id, plan, fact, report_id, attempts=3):
+    """
+    Идемпотентное сохранение отчёта.
+    Все повторы используют один reportId, поэтому потерянный HTTP-ответ
+    не приводит к повторному изменению таблицы.
+    """
+    payload = {
+        "action": "vkSave",
+        "vkId": str(vk_id),
+        "plan": int(plan),
+        "fact": int(fact),
+        "reportId": str(report_id),
+    }
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            print(
+                f"REPORT GOOGLE ATTEMPT {attempt}/{attempts} "
+                f"report_id={report_id}",
+                flush=True,
+            )
+            r = requests.post(
+                GOOGLE_SCRIPT_URL,
+                json=payload,
+                timeout=(5, 12),
+            )
+            r.raise_for_status()
+            result = r.json()
+            print(
+                f"REPORT GOOGLE OK attempt={attempt} "
+                f"report_id={report_id}",
+                flush=True,
+            )
+            return result
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            print(
+                f"REPORT GOOGLE RESPONSE LOST attempt={attempt}/{attempts} "
+                f"report_id={report_id}: {exc!r}",
+                flush=True,
+            )
+            if attempt < attempts:
+                time.sleep(1.0 * attempt)
+
+    raise last_error or RuntimeError("Google report save failed")
+
+def google_sync_participants(members, sync_id):
+    """
+    Повторяет только syncParticipants с одним syncId.
+    Если первый запрос успел примениться, но ответ потерялся, Apps Script
+    вернёт сохранённый результат без повторного изменения таблицы.
+    """
+    payload = {
+        "action": "syncParticipants",
+        "members": members,
+        "syncId": sync_id,
+        "password": GOOGLE_SCRIPT_PASSWORD,
+    }
+    last_error = None
+
+    for attempt in range(1, 3):
+        try:
+            print(
+                f"PARTICIPANTS GOOGLE ATTEMPT {attempt}/2 sync_id={sync_id}",
+                flush=True,
+            )
+            r = requests.post(
+                GOOGLE_SCRIPT_URL,
+                json=payload,
+                timeout=(5, 12),
+            )
+            r.raise_for_status()
+            result = r.json()
+            print(
+                f"PARTICIPANTS GOOGLE OK attempt={attempt} sync_id={sync_id}",
+                flush=True,
+            )
+            return result
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            print(
+                f"PARTICIPANTS GOOGLE RESPONSE LOST attempt={attempt}/2 "
+                f"sync_id={sync_id}: {exc!r}",
+                flush=True,
+            )
+            if attempt < 2:
+                time.sleep(1.0)
+
+    raise last_error or RuntimeError("Google participants sync failed")
+
 @app.route("/sync-participants-silent", methods=["POST"])
 def sync_participants_silent_route():
     try:
@@ -1283,13 +1376,16 @@ def sync_participants_silent_route():
         # Та же рабочая синхронизация, что и у команды в VK.
         # Возвращаем результат только вызывающему Apps Script, в VK ничего не отправляем.
         vk_members = vk_get_chat_members(peer_id)
-        result = google_post({
-            "action": "syncParticipants",
-            "members": [
+        sync_id = str(data.get("sync_id") or "").strip() or (
+            f"sync-{peer_id}-{int(time.time())}"
+        )
+        result = google_sync_participants(
+            [
                 {"vkId": p["vkId"], "name": p["name"]}
                 for p in vk_members
             ],
-        })
+            sync_id,
+        )
 
         if not result.get("success"):
             raise RuntimeError(result.get("error", "Синхронизация не выполнена"))
