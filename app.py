@@ -964,7 +964,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.12-idempotent-reports"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.13-fix-report-auth"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1284,6 +1284,7 @@ def google_save_report(vk_id, plan, fact, report_id, attempts=3):
         "plan": int(plan),
         "fact": int(fact),
         "reportId": str(report_id),
+        "password": GOOGLE_SCRIPT_PASSWORD,
     }
     last_error = None
 
@@ -1303,7 +1304,9 @@ def google_save_report(vk_id, plan, fact, report_id, attempts=3):
             result = r.json()
             print(
                 f"REPORT GOOGLE OK attempt={attempt} "
-                f"report_id={report_id}",
+                f"report_id={report_id} "
+                f"success={result.get('success')} "
+                f"error={result.get('error')!r}",
                 flush=True,
             )
             return result
