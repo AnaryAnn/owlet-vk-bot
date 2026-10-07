@@ -615,31 +615,68 @@ def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
     return None
 
 
-def send_report_confirmation_background(peer_id, name, plan, fact, artifact_roll=None):
+def roll_artifact_direct(vk_id, name, plan, fact, report_id):
+    """Бросок артефакта напрямую через Digest Script, без цепочки GAS -> GAS."""
+    force_drop = str(vk_id) == "54341305"
+    return digest_post({
+        "action": "rollArtifact",
+        "reportId": str(report_id),
+        "vkId": str(vk_id),
+        "name": str(name or ""),
+        "plan": int(plan),
+        "fact": int(fact),
+        "forceArtifactDrop": force_drop,
+    }, timeout=12)
+
+
+def send_report_confirmation_background(
+    peer_id, vk_id, name, plan, fact, report_id, artifact_eligible=False
+):
+    """
+    Формирует одно сообщение подтверждения.
+    Отчёт к этому моменту уже сохранён. Если факт вырос, здесь в фоне
+    выполняется бросок артефакта напрямую через Digest Script.
+    """
     message = (
         f"🦉 Данные сохранены!\n{name}: "
         f"план {plan} 🐭, факт {fact} 🐭"
     )
-
     attachment = None
-    roll = artifact_roll or {}
-    artifact = roll.get("artifact") or {}
 
-    if roll.get("dropped") and artifact:
-        intro = str(artifact.get("intro") or "✨ Робосычик нашёл артефакт!").strip()
-        emoji = str(artifact.get("emoji") or "").strip()
-        label = str(artifact.get("label") or "Выпал артефакт").strip()
-        artifact_name = str(artifact.get("name") or "Неизвестный артефакт").strip()
-        description = str(artifact.get("description") or "").strip()
-        vk_photo = str(artifact.get("vkPhoto") or "").strip()
+    if artifact_eligible and report_id:
+        try:
+            roll = roll_artifact_direct(vk_id, name, plan, fact, report_id)
+            artifact = (roll or {}).get("artifact") or {}
 
-        artifact_lines = [intro, "", f"{emoji} {label}".strip(), artifact_name]
-        if description:
-            artifact_lines += ["", f"«{description}»"]
-        message += "\n\n" + "\n".join(artifact_lines)
+            if (roll or {}).get("dropped") and artifact:
+                intro = str(
+                    artifact.get("intro") or "✨ Робосычик нашёл артефакт!"
+                ).strip()
+                emoji = str(artifact.get("emoji") or "").strip()
+                label = str(artifact.get("label") or "Выпал артефакт").strip()
+                artifact_name = str(
+                    artifact.get("name") or "Неизвестный артефакт"
+                ).strip()
+                description = str(artifact.get("description") or "").strip()
+                vk_photo = str(artifact.get("vkPhoto") or "").strip()
 
-        if re.fullmatch(r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE):
-            attachment = vk_photo.lower()
+                artifact_lines = [
+                    intro,
+                    "",
+                    f"{emoji} {label}".strip(),
+                    artifact_name,
+                ]
+                if description:
+                    artifact_lines += ["", f"«{description}»"]
+                message += "\n\n" + "\n".join(artifact_lines)
+
+                if re.fullmatch(
+                    r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE
+                ):
+                    attachment = vk_photo.lower()
+        except Exception as exc:
+            # Артефакт не должен задерживать или ломать подтверждение отчёта.
+            print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
 
     vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
 
@@ -985,7 +1022,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.13-fix-report-auth"}
+    return {"ok":True, "service":"sychnaya-ohota-v7.10.14-fast-artifacts"}
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1129,10 +1166,12 @@ def vk_callback():
                     target=send_report_confirmation_background,
                     args=(
                         peer_id,
+                        user_id,
                         result.get("name", ""),
                         plan,
                         fact,
-                        result.get("artifactRoll") or {},
+                        report_id,
+                        bool(result.get("artifactEligible")),
                     ),
                     daemon=True,
                 ).start()
@@ -1243,16 +1282,18 @@ def vk_callback():
                 flush=True,
             )
             threading.Thread(
-                target=send_report_confirmation_background,
-                args=(
+                    target=send_report_confirmation_background,
+                    args=(
                         peer_id,
+                        user_id,
                         result.get("name", ""),
                         plan,
                         fact,
-                        result.get("artifactRoll") or {},
+                        report_id,
+                        bool(result.get("artifactEligible")),
                     ),
-                daemon=True,
-            ).start()
+                    daemon=True,
+                ).start()
         else:
             vk_send(peer_id, "Не удалось сохранить данные.")
 
@@ -1318,8 +1359,6 @@ def google_save_report(vk_id, plan, fact, report_id, attempts=3):
         "fact": int(fact),
         "reportId": str(report_id),
         "password": GOOGLE_SCRIPT_PASSWORD,
-        # Временный тест: только для VK 54341305 шанс выпадения = 100%.
-        "forceArtifactDrop": str(vk_id) == "54341305",
     }
     last_error = None
 
