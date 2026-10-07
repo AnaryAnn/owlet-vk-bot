@@ -16,6 +16,19 @@ GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL", "").strip()
 GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
 DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
+
+
+def report_diag(report_id, stage, started=None, **extra):
+    """Короткие временные метки для диагностики задержки отчётов."""
+    now = time.monotonic()
+    elapsed = None if started is None else round(now - started, 3)
+    details = " ".join(f"{k}={v!r}" for k, v in extra.items())
+    print(
+        f"REPORT DIAG report_id={report_id} stage={stage} "
+        f"elapsed={elapsed}s {details}".rstrip(),
+        flush=True,
+    )
+    return now
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
 STATS_PEER_ID = 2000000002
@@ -543,6 +556,8 @@ def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
     """
     random_id = random.randint(1, 2147483647)
     last_error = None
+    diag_started = time.monotonic()
+    report_diag(report_id, "google_save_start", diag_started, vk_id=str(vk_id), plan=plan, fact=fact)
 
     for attempt in range(1, attempts + 1):
         try:
@@ -615,18 +630,29 @@ def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
     return None
 
 
-def roll_artifact_direct(vk_id, name, plan, fact, report_id):
-    """Бросок артефакта напрямую через Digest Script, без цепочки GAS -> GAS."""
-    force_drop = str(vk_id) == "54341305"
-    return digest_post({
+def roll_artifact_direct(vk_id, name, plan, fact, report_id, diag_started=None):
+    """Бросок артефакта напрямую через Digest Script."""
+    report_diag(report_id, "artifact_request_start", diag_started, vk_id=str(vk_id))
+    t0 = time.monotonic()
+    result = digest_post({
         "action": "rollArtifact",
         "reportId": str(report_id),
         "vkId": str(vk_id),
         "name": str(name or ""),
         "plan": int(plan),
         "fact": int(fact),
-        "forceArtifactDrop": force_drop,
+        # Оставляем флаг для совместимости, но Digest Script сам
+        # гарантирует 100% для тестового VK ID.
+        "forceArtifactDrop": str(vk_id) == "54341305",
     }, timeout=12)
+    report_diag(
+        report_id, "artifact_request_done", diag_started,
+        request_seconds=round(time.monotonic() - t0, 3),
+        dropped=result.get("dropped"),
+        chance=result.get("chance"),
+        duplicate=result.get("duplicateRequest"),
+    )
+    return result
 
 
 def send_report_confirmation_background(
@@ -637,6 +663,11 @@ def send_report_confirmation_background(
     Отчёт к этому моменту уже сохранён. Если факт вырос, здесь в фоне
     выполняется бросок артефакта напрямую через Digest Script.
     """
+    diag_started = time.monotonic()
+    report_diag(
+        report_id, "confirmation_thread_start", diag_started,
+        artifact_eligible=artifact_eligible, vk_id=str(vk_id)
+    )
     message = (
         f"🦉 Данные сохранены!\n{name}: "
         f"план {plan} 🐭, факт {fact} 🐭"
@@ -645,7 +676,7 @@ def send_report_confirmation_background(
 
     if artifact_eligible and report_id:
         try:
-            roll = roll_artifact_direct(vk_id, name, plan, fact, report_id)
+            roll = roll_artifact_direct(vk_id, name, plan, fact, report_id, diag_started)
             artifact = (roll or {}).get("artifact") or {}
 
             if (roll or {}).get("dropped") and artifact:
@@ -678,7 +709,19 @@ def send_report_confirmation_background(
             # Артефакт не должен задерживать или ломать подтверждение отчёта.
             print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
 
-    vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
+    report_diag(
+        report_id, "vk_send_start", diag_started,
+        has_attachment=bool(attachment)
+    )
+    send_t0 = time.monotonic()
+    send_result = vk_send_reliable(
+        peer_id, message, attachment=attachment, attempts=6
+    )
+    report_diag(
+        report_id, "vk_send_done", diag_started,
+        send_seconds=round(time.monotonic() - send_t0, 3),
+        sent=bool(send_result)
+    )
 
 def vk_get_chat_members(peer_id):
     """Получает актуальных пользователей беседы VK. Ничего не меняет."""
@@ -1138,6 +1181,7 @@ def vk_callback():
 
             plan, fact = map(int, plain_report.groups())
             report_id = f"vk-{event_id}"
+            report_diag(report_id, "callback_report_received", None, vk_id=str(user_id), plan=plan, fact=fact)
             result = google_save_report(
                 user_id, plan, fact, report_id, attempts=3
             )
@@ -1258,6 +1302,7 @@ def vk_callback():
 
         plan, fact = map(int, m.groups())
         report_id = f"vk-{event_id}"
+        report_diag(report_id, "callback_report_received", None, vk_id=str(user_id), plan=plan, fact=fact)
         result = google_save_report(
             user_id, plan, fact, report_id, attempts=3
         )
@@ -1382,6 +1427,11 @@ def google_save_report(vk_id, plan, fact, report_id, attempts=3):
                 f"success={result.get('success')} "
                 f"error={result.get('error')!r}",
                 flush=True,
+            )
+            report_diag(
+                report_id, "google_save_done", diag_started,
+                attempt=attempt, artifactEligible=result.get("artifactEligible"),
+                previousFact=result.get("previousFact")
             )
             return result
         except (requests.Timeout, requests.ConnectionError) as exc:
