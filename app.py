@@ -1473,6 +1473,7 @@ def google_sync_participants(members, sync_id):
                 time.sleep(1.0)
 
     raise last_error or RuntimeError("Google participants sync failed")
+    
 
 @app.route("/sync-participants-silent", methods=["POST"])
 def sync_participants_silent_route():
