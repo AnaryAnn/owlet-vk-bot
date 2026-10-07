@@ -615,12 +615,33 @@ def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
     return None
 
 
-def send_report_confirmation_background(peer_id, name, plan, fact):
+def send_report_confirmation_background(peer_id, name, plan, fact, artifact_roll=None):
     message = (
         f"🦉 Данные сохранены!\n{name}: "
         f"план {plan} 🐭, факт {fact} 🐭"
     )
-    vk_send_reliable(peer_id, message, attempts=6)
+
+    attachment = None
+    roll = artifact_roll or {}
+    artifact = roll.get("artifact") or {}
+
+    if roll.get("dropped") and artifact:
+        intro = str(artifact.get("intro") or "✨ Робосычик нашёл артефакт!").strip()
+        emoji = str(artifact.get("emoji") or "").strip()
+        label = str(artifact.get("label") or "Выпал артефакт").strip()
+        artifact_name = str(artifact.get("name") or "Неизвестный артефакт").strip()
+        description = str(artifact.get("description") or "").strip()
+        vk_photo = str(artifact.get("vkPhoto") or "").strip()
+
+        artifact_lines = [intro, "", f"{emoji} {label}".strip(), artifact_name]
+        if description:
+            artifact_lines += ["", f"«{description}»"]
+        message += "\n\n" + "\n".join(artifact_lines)
+
+        if re.fullmatch(r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE):
+            attachment = vk_photo.lower()
+
+    vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
 
 def vk_get_chat_members(peer_id):
     """Получает актуальных пользователей беседы VK. Ничего не меняет."""
@@ -1106,7 +1127,13 @@ def vk_callback():
                 )
                 threading.Thread(
                     target=send_report_confirmation_background,
-                    args=(peer_id, result.get("name", ""), plan, fact),
+                    args=(
+                        peer_id,
+                        result.get("name", ""),
+                        plan,
+                        fact,
+                        result.get("artifactRoll") or {},
+                    ),
                     daemon=True,
                 ).start()
             else:
@@ -1217,7 +1244,13 @@ def vk_callback():
             )
             threading.Thread(
                 target=send_report_confirmation_background,
-                args=(peer_id, result.get("name", ""), plan, fact),
+                args=(
+                        peer_id,
+                        result.get("name", ""),
+                        plan,
+                        fact,
+                        result.get("artifactRoll") or {},
+                    ),
                 daemon=True,
             ).start()
         else:
@@ -1285,6 +1318,8 @@ def google_save_report(vk_id, plan, fact, report_id, attempts=3):
         "fact": int(fact),
         "reportId": str(report_id),
         "password": GOOGLE_SCRIPT_PASSWORD,
+        # Временный тест: только для VK 54341305 шанс выпадения = 100%.
+        "forceArtifactDrop": str(vk_id) == "54341305",
     }
     last_error = None
 
