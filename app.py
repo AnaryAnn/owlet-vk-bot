@@ -271,6 +271,56 @@ def extract_final_digest(content):
     return text
 
 
+def build_local_digest(useful):
+    """Резервный выпуск без ИИ: только реальные цитаты из беседы."""
+    extracts = []
+    seen = set()
+    for entry in useful:
+        name, separator, raw_text = entry.partition(": ")
+        if not separator:
+            continue
+        message = re.sub(r"\s+", " ", raw_text).strip()
+        # Односложные ответы и дубли для подборки не подходят.
+        if len(message) < 24:
+            continue
+        key = message.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        extracts.append((name, message))
+
+    if not extracts:
+        return (
+            "📰 Сычевестник\n\n"
+            "⚙️ ИИ-редактор временно недоступен. "
+            "Для резервной подборки не нашлось достаточно содержательных сообщений. 🤖"
+        )
+
+    # Берём сообщения из разных частей переписки, сохраняя исходный порядок.
+    recent = extracts[-30:]
+    count = min(6, len(recent))
+    if count == 1:
+        selected = recent
+    else:
+        indexes = [round(i * (len(recent) - 1) / (count - 1)) for i in range(count)]
+        selected = [recent[i] for i in indexes]
+
+    bullets = []
+    for name, message in selected:
+        if len(message) > 230:
+            message = message[:229].rsplit(" ", 1)[0].rstrip() + "…"
+        bullets.append(f"• {name}: «{message}»")
+
+    return (
+        "📰 Сычевестник\n\n"
+        "⚙️ ИИ-редактор временно недоступен, поэтому сегодня "
+        "Робосычик собрал выдержки из настоящих сообщений. "
+        "Это не пересказ, а резервная подборка.\n\n"
+        + "\n".join(bullets)
+        + "\n\n🤖 Все показанные реплики взяты из переписки Совиной академии."
+    )
+
+
 def build_digest(messages):
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
@@ -355,11 +405,14 @@ def build_digest(messages):
         "max_tokens": 2400,
     }
 
+    # Автомаршрутизатор выбирает доступную бесплатную модель; следующие две
+    # используются, если ответ оказался некорректным или модель недоступна.
+    # При исчерпании суточной квоты OpenRouter ни одна бесплатная модель
+    # не поможет: в этом случае ниже сработает локальная подборка цитат.
     models = [
+        "openrouter/free",
         "dots-studio/dots-3-note-preview-20260813:free",
         "nvidia/nemotron-3-super-120b-a12b:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemma-4-31b-it:free",
     ]
     last_error = None
 
@@ -477,10 +530,14 @@ def build_digest(messages):
                     flush=True,
                 )
 
-    raise RuntimeError(
-        "OpenRouter failed on all configured models: "
-        + str(last_error or "unknown error")
+    # Не теряем запланированный выпуск, даже если у бесплатного OpenRouter
+    # закончились запросы или все модели временно недоступны.
+    print(
+        "OPENROUTER ALL MODELS FAILED; LOCAL DIGEST FALLBACK: "
+        + str(last_error or "unknown error"),
+        flush=True,
     )
+    return build_local_digest(useful)
 
 def split_vk_message(text, limit=3900):
     """Делит длинное сообщение VK на части без потери текста."""
