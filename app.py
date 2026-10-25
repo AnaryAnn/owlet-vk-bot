@@ -1158,6 +1158,140 @@ def sychevestnik_schedule():
         }, 500
 
 
+
+# ================================================================
+# НЕДЕЛЬНЫЕ БОНУСЫ: перечень получателей по факту из обычной
+# статистики. Таблица с недельными результатами уже подключена через
+# GOOGLE_SCRIPT_URL/GOOGLE_SCRIPT_PASSWORD; отдельный ID не нужен.
+# ================================================================
+
+def _bonus_vk_id(value):
+    """Не путаем ID ВКонтакте с номером строки таблицы."""
+    value = str(value or "").strip()
+    match = re.fullmatch(r"(?:https?://(?:www\.)?vk\.com/)?id(\d+)", value, re.I)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[1-9]\d*", value):
+        return value
+    return ""
+
+
+def _bonus_field_id(item):
+    """Только поля, которые явно означают VK ID (не generic id)."""
+    for key in ("vkId", "vk_id", "vkID", "VK ID", "vkUserId", "vk_user_id"):
+        value = _bonus_vk_id(item.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _bonus_name(value):
+    return " ".join(str(value or "").casefold().split())
+
+
+def _bonus_fact(value):
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        n = float(str(value or "0").replace("\xa0", "").replace(" ", "").replace(",", "."))
+        return n if math.isfinite(n) else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def build_weekly_bonus_candidates(threshold):
+    """Определяет получателей, ничего не записывая и не отправляя в VK."""
+    stats = google_get({"action": "stats"})
+    if not stats.get("success"):
+        raise RuntimeError(stats.get("error") or "Не удалось получить недельную статистику")
+
+    records = stats.get("currentRecords")
+    if not isinstance(records, list):
+        raise RuntimeError("Ответ статистики не содержит currentRecords — проверь основное Google API")
+
+    week = stats.get("currentWeek") or {}
+    week_key = str(week.get("start") or week.get("startDisplay") or "").strip()
+    if not week_key:
+        raise RuntimeError("Недельная статистика не вернула начало недели: защищаем от повторных наград")
+
+    participants = stats.get("participants") or []
+    if not participants:
+        more = google_get({"action": "participants"})
+        if not more.get("success"):
+            raise RuntimeError(more.get("error") or "Не удалось получить список участников")
+        participants = more.get("participants") or []
+
+    by_name = {}
+    for p in participants:
+        if not isinstance(p, dict):
+            continue
+        vk_id = _bonus_field_id(p)
+        name = _bonus_name(p.get("name"))
+        if name:
+            by_name.setdefault(name, set()).add(vk_id or "")
+
+    eligible = {}
+    unresolved = []
+    for index, row in enumerate(records, start=1):
+        if not isinstance(row, dict):
+            continue
+        fact = _bonus_fact(row.get("fact"))
+        if fact <= threshold:  # Строго БОЛЬШЕ, не >=
+            continue
+        name = str(row.get("name") or "").strip()
+        vk_id = _bonus_field_id(row)
+        if not vk_id:
+            match_ids = by_name.get(_bonus_name(name), set())
+            if len(match_ids) == 1:
+                vk_id = next(iter(match_ids))
+        if not vk_id:
+            unresolved.append({"name": name or f"Строка {index}", "fact": fact,
+                               "reason": "Неоднозначное имя или отсутствует VK ID"})
+            continue
+        if vk_id in eligible:
+            unresolved.append({"name": name or f"Строка {index}", "fact": fact,
+                               "reason": "Повтор VK ID в недельных результатах: " + vk_id})
+            continue
+        eligible[vk_id] = {
+            "vkId": vk_id,
+            "name": name or vk_id,
+            "fact": fact,
+            "plan": _bonus_fact(row.get("plan")),
+        }
+
+    return {
+        "success": True,
+        "threshold": threshold,
+        "weekKey": week_key,
+        "weekStart": str(week.get("startDisplay") or week.get("start") or ""),
+        "weekEnd": str(week.get("endDisplay") or week.get("end") or ""),
+        "recordCount": len(records),
+        "eligible": list(eligible.values()),
+        "unresolved": unresolved,
+    }
+
+
+@app.post("/weekly-artifact-candidates")
+def weekly_artifact_candidates():
+    supplied_secret = (request.headers.get("X-Schedule-Secret") or "").strip()
+    if not SCHEDULE_SECRET or supplied_secret != SCHEDULE_SECRET:
+        return jsonify({"success": False, "error": "forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        threshold = float(data.get("threshold"))
+        if not math.isfinite(threshold) or threshold < 0:
+            raise ValueError("threshold должен быть неотрицательным числом")
+    except (ValueError, TypeError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    try:
+        result = build_weekly_bonus_candidates(threshold)
+        return jsonify(result), 200
+    except Exception as exc:
+        print("WEEKLY ARTIFACT CANDIDATES ERROR:", repr(exc), flush=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.post("/statistics-schedule")
 def statistics_schedule():
     supplied_secret = (
