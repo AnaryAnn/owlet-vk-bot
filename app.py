@@ -6,6 +6,8 @@ import math
 import time
 import requests
 from flask import Flask, request, Response, jsonify
+from quest_engine import tick as quest_tick
+from quest_milestones import send_milestones
 
 app = Flask(__name__)
 
@@ -1077,6 +1079,10 @@ def generate_scheduled_stats():
 
     message = build_weekly_stats()
     vk_result = vk_send(peer_id, message)
+    try:
+        send_milestones(google_get, split_vk_message)
+    except Exception as exc:
+        print("QUEST MILESTONES ERROR:", repr(exc), flush=True)
 
     print(
         "WEEKLY STATS SENT:",
@@ -1096,6 +1102,10 @@ def generate_stats_background(peer_id):
     try:
         message = build_weekly_stats()
         vk_send(peer_id, message)
+        try:
+            send_milestones(google_get, split_vk_message)
+        except Exception as exc:
+            print("QUEST MILESTONES ERROR:", repr(exc), flush=True)
     except Exception as e:
         print("STATS ERROR:", repr(e), flush=True)
         try:
@@ -1710,6 +1720,21 @@ def sync_participants_silent_route():
             "success": False,
             "error": str(exc),
         }), 500
+
+
+@app.post("/quest-tick")
+def quest_tick_route():
+    supplied = request.headers.get("X-Schedule-Secret", "").strip()
+    if not SCHEDULE_SECRET or supplied != SCHEDULE_SECRET:
+        return jsonify({"success": False, "error": "forbidden"}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        result = quest_tick(google_get, vk_send, STATS_PEER_ID,
+                            dry_run=data.get("dry_run") is True)
+        return jsonify(result), 200
+    except Exception as exc:
+        app.logger.exception("QUEST TICK ERROR")
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":
