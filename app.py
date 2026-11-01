@@ -1334,10 +1334,9 @@ def statistics_schedule():
         }, 500
 
 
-@app.post("/vk")
-def vk_callback():
+def process_vk_event(data):
+    """Обработка события вне HTTP-запроса VK."""
     try:
-        data = request.get_json(silent=True) or {}
         if data.get("type") == "confirmation":
             return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
         if data.get("type") != "message_new":
@@ -1531,9 +1530,37 @@ def vk_callback():
 
         return Response("ok")
     except Exception as e:
-        print("VK CALLBACK ERROR:", repr(e))
+        print("VK EVENT PROCESSING FAILED:", repr(e), "event_id=", data.get("event_id"), flush=True)
         return Response("ok")
 
+
+@app.post("/vk")
+def vk_callback():
+    """Немедленно подтверждает Callback API, не ожидая Google Apps Script."""
+    data = request.get_json(silent=True) or {}
+    if data.get("type") == "confirmation":
+        return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
+    if data.get("type") != "message_new":
+        return Response("ok", mimetype="text/plain")
+    if str(data.get("group_id", "")) != VK_GROUP_ID:
+        return Response("ok", mimetype="text/plain")
+
+    msg = (data.get("object") or {}).get("message") or {}
+    print(
+        "VK RECEIVED",
+        "event_id=", data.get("event_id"),
+        "message_id=", msg.get("id"),
+        "peer_id=", msg.get("peer_id"),
+        "text=", repr((msg.get("text") or "")[:160]),
+        flush=True,
+    )
+    threading.Thread(
+        target=process_vk_event,
+        args=(data,),
+        daemon=True,
+        name="vk-event-worker",
+    ).start()
+    return Response("ok", mimetype="text/plain")
 
 
 @app.route("/send-owlet-message", methods=["POST"])
