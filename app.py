@@ -30,6 +30,9 @@ GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL", "").strip()
 GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
 DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
 DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
+# Временно отключаем архивирование сообщений для Сычевестника.
+# Чтобы вернуть сбор, установите SAVE_CHAT_MESSAGES=true в Render.
+SAVE_CHAT_MESSAGES = os.environ.get("SAVE_CHAT_MESSAGES", "false").strip().lower() in ("1", "true", "yes", "on")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
 STATS_PEER_ID = 2000000002
@@ -1209,9 +1212,9 @@ def _bonus_fact(value):
         return 0.0
 
 
-def build_weekly_bonus_candidates(threshold):
+def build_weekly_bonus_candidates(threshold, week_selection="current"):
     """Определяет получателей, ничего не записывая и не отправляя в VK."""
-    stats = google_get({"action": "stats"})
+    stats = google_get({"action": "bonusWeekStats", "week": week_selection})
     if not stats.get("success"):
         raise RuntimeError(stats.get("error") or "Не удалось получить недельную статистику")
 
@@ -1272,6 +1275,7 @@ def build_weekly_bonus_candidates(threshold):
     return {
         "success": True,
         "threshold": threshold,
+        "selectedWeek": week_selection,
         "weekKey": week_key,
         "weekStart": str(week.get("startDisplay") or week.get("start") or ""),
         "weekEnd": str(week.get("endDisplay") or week.get("end") or ""),
@@ -1294,8 +1298,11 @@ def weekly_artifact_candidates():
     except (ValueError, TypeError) as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
 
+    week_selection = str(data.get("week") or "current").strip().lower()
+    if week_selection not in ("current", "previous"):
+        return jsonify({"success": False, "error": "week должен быть current или previous"}), 400
     try:
-        result = build_weekly_bonus_candidates(threshold)
+        result = build_weekly_bonus_candidates(threshold, week_selection)
         return jsonify(result), 200
     except Exception as exc:
         print("WEEKLY ARTIFACT CANDIDATES ERROR:", repr(exc), flush=True)
@@ -1353,11 +1360,12 @@ def process_vk_event(data):
         if not user_id or not peer_id or int(peer_id) < 2000000000:
             return Response("ok")
 
-        threading.Thread(
-            target=save_chat_message_background,
-            args=(dict(msg), event_id),
-            daemon=True,
-        ).start()
+        if SAVE_CHAT_MESSAGES:
+            threading.Thread(
+                target=save_chat_message_background,
+                args=(dict(msg), event_id),
+                daemon=True,
+            ).start()
 
         # Отчёт без VK-тега:
         # "Робосычик 10,6", регистр и количество пробелов не важны.
