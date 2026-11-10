@@ -10,7 +10,8 @@ from quest_engine import tick as quest_tick
 from quest_milestones import send_milestones
 
 app = Flask(__name__)
-
+from website_api import website_api
+app.register_blueprint(website_api)
 
 def report_diag(report_id, stage, started=None, **extra):
     now = time.monotonic()
