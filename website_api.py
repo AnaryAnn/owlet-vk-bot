@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import hmac
+import base64
 from flask import Blueprint, jsonify, request, make_response
 from sheets_api import read_current_stats
 
@@ -17,7 +18,14 @@ def website_stats():
     if request.method == 'OPTIONS':
         response = make_response('', 204)
     else:
-        supplied = request.headers.get('X-Website-Password', '')
+        encoded = request.headers.get('X-Website-Password', '')
+
+try:
+    supplied = base64.b64decode(
+        encoded, validate=True
+    ).decode('utf-8')
+except (ValueError, UnicodeError):
+    supplied = ''
         valid = [os.environ.get('WEBSITE_SITE_PASSWORD', ''), os.environ.get('WEBSITE_ADMIN_PASSWORD', '')]
         if not any(p and hmac.compare_digest(supplied.encode("utf-8"), p.encode("utf-8")) for p in valid):
             response = jsonify({"success": False, "unauthorized": True})
