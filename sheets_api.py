@@ -1,5 +1,6 @@
 """Read-only Google Sheets adapter for the current-week website statistics."""
 import json
+import math
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -24,12 +25,14 @@ def _session():
 def _number(value):
     if value is None or str(value).strip() == "":
         return 0
-    text = str(value).replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    text = "".join(str(value).split()).replace(",", ".")
     n = float(text)
+    if not math.isfinite(n):
+        raise ValueError("Statistics value must be finite")
     return int(n) if n.is_integer() else n
 
 
-def _week():
+def current_week():
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
     start = today - timedelta(days=(today.weekday() - 1) % 7)
     end = start + timedelta(days=6)
@@ -42,15 +45,16 @@ def _quote(name):
     return "'" + name.replace("'", "''") + "'"
 
 
-def read_current_stats():
-    week = _week()
+def read_current_stats(week=None):
+    week = current_week() if week is None else week
     ranges = [f"{_quote('Участники')}!A2:C", f"{_quote(week['sheetName'])}!B2",
               f"{_quote(week['sheetName'])}!A8:D"]
-    response = _session().get(
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchGet",
-        params={"ranges": ranges, "valueRenderOption": "FORMATTED_VALUE"}, timeout=25)
-    response.raise_for_status()
-    data = response.json().get("valueRanges", [])
+    with _session() as session:
+        response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchGet",
+            params={"ranges": ranges, "valueRenderOption": "FORMATTED_VALUE"}, timeout=25)
+        response.raise_for_status()
+        data = response.json().get("valueRanges", [])
     if len(data) != 3:
         raise RuntimeError("Unexpected Google Sheets response")
     participant_rows = data[0].get("values", [])
@@ -81,3 +85,4 @@ def read_current_stats():
             "participants": participants, "currentRecords": records,
             "weeks": [{"sheetName": week["sheetName"], "weekStart": week["start"],
                        "weekEnd": week["end"], "goal": goal, "records": records}]}
+

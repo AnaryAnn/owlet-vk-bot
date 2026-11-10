@@ -5,11 +5,11 @@ import time
 import hmac
 import base64
 from flask import Blueprint, jsonify, request, make_response, current_app
-from sheets_api import read_current_stats
+from sheets_api import read_current_stats, current_week
 
 website_api = Blueprint("website_api", __name__)
 _lock = threading.Lock()
-_cache = {"data": None, "expires": 0}
+_cache = {"data": None, "expires": 0, "week": None}
 
 @website_api.route('/api/website/stats', methods=['GET', 'OPTIONS'])
 def website_stats():
@@ -33,9 +33,12 @@ def website_stats():
         else:
             try:
                 with _lock:
-                    if _cache['data'] is None or time.monotonic() >= _cache['expires']:
-                        _cache['data'] = read_current_stats()
+                    week = current_week()
+                    if (_cache['data'] is None or time.monotonic() >= _cache['expires']
+                            or _cache['week'] != week['start']):
+                        _cache['data'] = read_current_stats(week=week)
                         _cache['expires'] = time.monotonic() + 300
+                        _cache['week'] = week['start']
                     data = _cache['data']
                 response = jsonify(data)
             except Exception:
@@ -49,3 +52,4 @@ def website_stats():
         response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
     response.headers['Cache-Control'] = 'no-store'
     return response
+
