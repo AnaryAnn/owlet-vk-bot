@@ -1,4 +1,4 @@
-"""Запись отчётов сайта напрямую в Sheets; общий замок с Apps Script.
+"""Прямая запись отчётов в Sheets после полного отключения Apps Script.
 
 Замок не имеет автоматического протухания: при неопределённом результате
 записи он сохраняется до проверки оператором, чтобы поздний ответ Google
@@ -22,7 +22,6 @@ ARTIFACTS_ID = os.environ.get('ARTIFACTS_SPREADSHEET_ID',
     '1xpcRGO2i2nw6TAik3NskITxwAM6e7831LaSigDR3sRk')
 LOCK_ID = 1937152401
 LOCK_KEY = 'owlet_shared_write_v1'
-READY_ID = LOCK_ID + 1
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
 
 
@@ -281,13 +280,11 @@ def send_notification(report):
 
 
 def submit_report(data):
+    if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() != 'true':
+        raise Busy('Полный переход на Python ещё не завершён')
     name, plan, fact, report_id = payload_values(data)
     with _session(write=True) as session:
         api = Sheets(session)
-        for book in (SHEET_ID, ARTIFACTS_ID):
-            ready = api.get(book, f'/developerMetadata/{READY_ID}')
-            if ready.get('metadataKey') != 'owlet_shared_write_ready' or ready.get('metadataValue') != 'v1':
-                raise Busy('Общая блокировка Apps Script ещё не подключена')
         report, journal_id, journal_row = save_report(api, name, plan, fact, report_id)
         try:
             # Не держим замок статистики при обращении к другой таблице.

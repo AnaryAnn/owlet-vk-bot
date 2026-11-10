@@ -82,6 +82,8 @@ def report_payload(**kwargs):
 
 class RecordTests(unittest.TestCase):
     def setUp(self):
+        env = patch.dict('os.environ', {'NATIVE_STORAGE_ENABLED': 'true'})
+        env.start(); self.addCleanup(env.stop)
         self.api = MemorySheets()
         self.args = store.payload_values(report_payload())
 
@@ -193,10 +195,10 @@ class RecordTests(unittest.TestCase):
         drop.assert_called_once(); self.assertEqual(send.call_count, 2)
 
     @patch.object(store, '_session')
-    def test_missing_shared_lock_readiness_prevents_save(self, session):
-        self.api.get = Mock(return_value={})
+    def test_incomplete_native_migration_prevents_save(self, session):
         with patch.object(store, 'Sheets', return_value=self.api):
-            with self.assertRaises(store.Busy): store.submit_report(report_payload())
+            with patch.dict('os.environ', {'NATIVE_STORAGE_ENABLED': 'false'}):
+                with self.assertRaises(store.Busy): store.submit_report(report_payload())
         self.assertFalse(self.api.batches)
 
 
