@@ -4,7 +4,7 @@ import threading
 import time
 import hmac
 import base64
-from flask import Blueprint, jsonify, request, make_response
+from flask import Blueprint, jsonify, request, make_response, current_app
 from sheets_api import read_current_stats
 
 website_api = Blueprint("website_api", __name__)
@@ -20,12 +20,12 @@ def website_stats():
     else:
         encoded = request.headers.get('X-Website-Password', '')
 
-try:
-    supplied = base64.b64decode(
-        encoded, validate=True
-    ).decode('utf-8')
-except (ValueError, UnicodeError):
-    supplied = ''
+        try:
+            supplied = base64.b64decode(
+                encoded, validate=True
+            ).decode('utf-8')
+        except (ValueError, UnicodeError):
+            supplied = ''
         valid = [os.environ.get('WEBSITE_SITE_PASSWORD', ''), os.environ.get('WEBSITE_ADMIN_PASSWORD', '')]
         if not any(p and hmac.compare_digest(supplied.encode("utf-8"), p.encode("utf-8")) for p in valid):
             response = jsonify({"success": False, "unauthorized": True})
@@ -39,7 +39,7 @@ except (ValueError, UnicodeError):
                     data = _cache['data']
                 response = jsonify(data)
             except Exception:
-                website_api.logger.exception('Website stats load failed') if hasattr(website_api, 'logger') else None
+                current_app.logger.exception('Website stats load failed')
                 response = jsonify({"success": False, "error": "Не удалось загрузить статистику"})
                 response.status_code = 503
     if origin == allowed:
