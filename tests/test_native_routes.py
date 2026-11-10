@@ -17,6 +17,13 @@ class NativeRouteTests(unittest.TestCase):
         self.assertFalse(self.client.get('/api/website/login',headers=self.headers('обычный')).json['isAdmin'])
         self.assertTrue(self.client.get('/api/website/login',headers=self.headers('админ')).json['isAdmin'])
         self.assertEqual(self.client.get('/api/website/login',headers=self.headers('wrong')).status_code,401)
+    @patch('native_preflight.check',return_value={'success':True,'books':[]})
+    def test_preflight_read_only_requires_admin(self,check):
+        self.assertEqual(self.client.get('/api/website/preflight',headers=self.headers('обычный')).status_code,403)
+        check.assert_not_called()
+        result=self.client.get('/api/website/preflight',headers=self.headers('админ'))
+        self.assertEqual(result.status_code,200);self.assertTrue(result.json['success'])
+        check.assert_called_once()
     def test_guest_cannot_modify_goal_or_award_bonus(self):
         for route in ('settings','bonus'):
             r=self.client.post('/api/website/'+route,json={'goal':100},headers=self.headers('обычный'))

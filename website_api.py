@@ -28,6 +28,19 @@ def website_login():
     return jsonify(success=True, isAdmin=_admin())
 
 
+@website_api.route('/api/website/preflight', methods=['GET', 'OPTIONS'])
+def website_preflight():
+    if request.method == 'OPTIONS': return '', 204
+    if not _authorized(): return jsonify(success=False, unauthorized=True), 401
+    if not _admin(): return jsonify(success=False, forbidden=True), 403
+    try:
+        from native_preflight import check
+        return jsonify(check())
+    except Exception:
+        current_app.logger.exception('Native preflight failed')
+        return jsonify(success=False, error='Не удалось проверить доступ к таблицам; проверьте журнал Render'), 503
+
+
 @website_api.route('/api/website/settings', methods=['GET', 'POST', 'OPTIONS'])
 def website_settings():
     if request.method == 'OPTIONS': return '', 204
