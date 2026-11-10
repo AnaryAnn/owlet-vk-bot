@@ -4,6 +4,8 @@ import random
 import threading
 import math
 import time
+import json
+import hmac
 import requests
 from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
@@ -27,10 +29,6 @@ def report_diag(report_id, stage, started=None, **extra):
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip()
 VK_CONFIRMATION_CODE = os.environ.get("VK_CONFIRMATION_CODE", "").strip()
-GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL", "").strip()
-GOOGLE_SCRIPT_PASSWORD = os.environ.get("GOOGLE_SCRIPT_PASSWORD", "").strip()
-DIGEST_SCRIPT_URL = os.environ.get("DIGEST_SCRIPT_URL", "").strip()
-DIGEST_SCRIPT_PASSWORD = os.environ.get("DIGEST_SCRIPT_PASSWORD", "").strip()
 # Временно отключаем архивирование сообщений для Сычевестника.
 # Чтобы вернуть сбор, установите SAVE_CHAT_MESSAGES=true в Render.
 SAVE_CHAT_MESSAGES = os.environ.get("SAVE_CHAT_MESSAGES", "false").strip().lower() in ("1", "true", "yes", "on")
@@ -72,38 +70,13 @@ def command_event_once(event_id):
 
 
 def google_post(payload):
-    payload = dict(payload)
-    payload["password"] = GOOGLE_SCRIPT_PASSWORD
-    r = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
-    r.raise_for_status()
-    return r.json()
+    from native_storage import stats_post
+    return stats_post(payload)
 
 
 def google_get(params=None):
-    """GET к основному Google Apps Script с повтором при холодном старте."""
-    params = dict(params or {})
-    params["password"] = GOOGLE_SCRIPT_PASSWORD
-
-    last_error = None
-    for attempt, read_timeout in enumerate((25, 45), start=1):
-        try:
-            r = requests.get(
-                GOOGLE_SCRIPT_URL,
-                params=params,
-                timeout=(5, read_timeout),
-            )
-            r.raise_for_status()
-            return r.json()
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_error = exc
-            print(
-                f"GOOGLE GET RETRY {attempt}/2 action={params.get('action')}: {exc}",
-                flush=True,
-            )
-            if attempt < 2:
-                time.sleep(1.5)
-
-    raise last_error or RuntimeError("Google Apps Script request failed")
+    from native_storage import stats_get
+    return stats_get(params)
 
 
 def _num(value):
@@ -119,7 +92,7 @@ def _fmt_num(value):
 
 
 def build_weekly_stats():
-    """Собирает статистику текущей недели из основного Google Apps Script."""
+    """Собирает статистику текущей недели через Google Sheets API."""
     stats = google_get({"action": "stats"})
     if not stats.get("success"):
         raise RuntimeError(stats.get("error", "Не удалось получить статистику"))
@@ -226,16 +199,8 @@ def build_weekly_stats():
     )
 
 def digest_post(payload, timeout=12):
-    if not DIGEST_SCRIPT_URL or not DIGEST_SCRIPT_PASSWORD:
-        raise RuntimeError("Digest storage is not configured")
-    payload = dict(payload)
-    payload["password"] = DIGEST_SCRIPT_PASSWORD
-    r = requests.post(DIGEST_SCRIPT_URL, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("success"):
-        raise RuntimeError(data.get("error", "Digest Script error"))
-    return data
+    from native_storage import digest_post as native_digest
+    return native_digest(payload)
 
 
 def extract_final_digest(content):
@@ -691,7 +656,7 @@ def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
 
 
 def roll_artifact_direct(vk_id, name, plan, fact, report_id, started=None):
-    """Бросок артефакта напрямую через Digest Script."""
+    """Бросок артефакта через нативное хранилище Google Sheets."""
     report_diag(report_id, "artifact_request_start", started, vk_id=str(vk_id))
     t0 = time.monotonic()
     result = digest_post({
@@ -718,7 +683,7 @@ def send_report_confirmation_background(
     """
     Формирует одно сообщение подтверждения.
     Отчёт к этому моменту уже сохранён. Если факт вырос, здесь в фоне
-    выполняется бросок артефакта напрямую через Digest Script.
+    выполняется бросок артефакта через нативный адаптер.
     """
     started = time.monotonic()
     report_diag(
@@ -997,7 +962,7 @@ def generate_scheduled_digest(edition):
         flush=True,
     )
 
-    # Google Apps Script иногда отвечает медленно из-за холодного старта.
+    # Google Sheets API может временно отвечать медленно.
     # Не отменяем весь выпуск после первого ReadTimeout: пробуем до 3 раз.
     result = None
     last_fetch_error = None
@@ -1124,7 +1089,27 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-v7.10.14-fast-artifacts"}
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1",
+            "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
+
+
+@app.post('/native-schedule')
+def native_schedule():
+    supplied = request.headers.get('X-Schedule-Secret', '')
+    if not SCHEDULE_SECRET or not hmac.compare_digest(supplied, SCHEDULE_SECRET):
+        return jsonify(success=False, error='forbidden'), 403
+    try:
+        from native_jobs import due_jobs, run
+        schedule = json.loads(os.environ.get('NATIVE_SCHEDULES_JSON', '[]'))
+        results = []
+        for job in due_jobs(schedule):
+            try: results.append(run(job))
+            except Exception:
+                app.logger.exception('Native scheduled job failed: %s', job)
+                results.append(dict(success=False, job=job, error='Нужна проверка журнала _NativeJobs'))
+        return jsonify(success=all(r.get('success') for r in results), jobs=results)
+    except (ValueError, TypeError):
+        return jsonify(success=False, error='Некорректная конфигурация расписания'), 503
 
 @app.post("/sychevestnik")
 def sychevestnik_schedule():
@@ -1176,7 +1161,7 @@ def sychevestnik_schedule():
 # ================================================================
 # НЕДЕЛЬНЫЕ БОНУСЫ: перечень получателей по факту из обычной
 # статистики. Таблица с недельными результатами уже подключена через
-# GOOGLE_SCRIPT_URL/GOOGLE_SCRIPT_PASSWORD; отдельный ID не нужен.
+# Google Sheets API; отдельное хранилище статистики бонусов не нужно.
 # ================================================================
 
 def _bonus_vk_id(value):
@@ -1615,101 +1600,11 @@ def send_owlet_message_route():
 
 
 def google_save_report(vk_id, plan, fact, report_id, attempts=3):
-    """Идемпотентное сохранение отчёта с диагностикой времени."""
-    started = time.monotonic()
-    report_diag(
-        report_id, "google_save_start", started,
-        vk_id=str(vk_id), plan=plan, fact=fact
-    )
-    payload = {
-        "action": "vkSave",
-        "vkId": str(vk_id),
-        "plan": int(plan),
-        "fact": int(fact),
-        "reportId": str(report_id),
-        "password": GOOGLE_SCRIPT_PASSWORD,
-    }
-    last_error = None
-
-    for attempt in range(1, attempts + 1):
-        attempt_started = time.monotonic()
-        try:
-            print(
-                f"REPORT GOOGLE ATTEMPT {attempt}/{attempts} "
-                f"report_id={report_id}",
-                flush=True,
-            )
-            r = requests.post(
-                GOOGLE_SCRIPT_URL,
-                json=payload,
-                timeout=(5, 12),
-            )
-            r.raise_for_status()
-            result = r.json()
-            report_diag(
-                report_id, "google_save_done", started,
-                attempt=attempt,
-                attempt_seconds=round(time.monotonic() - attempt_started, 3),
-                success=result.get("success"),
-                artifactEligible=result.get("artifactEligible"),
-                previousFact=result.get("previousFact"),
-            )
-            return result
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_error = exc
-            report_diag(
-                report_id, "google_save_retry", started,
-                attempt=attempt,
-                error=repr(exc),
-            )
-            if attempt < attempts:
-                time.sleep(1.0 * attempt)
-
-    raise last_error or RuntimeError("Google report save failed")
+    return google_post({"action": "vkSave", "vkId": str(vk_id), "plan": int(plan),
+                        "fact": int(fact), "reportId": str(report_id)})
 
 def google_sync_participants(members, sync_id):
-    """
-    Повторяет только syncParticipants с одним syncId.
-    Если первый запрос успел примениться, но ответ потерялся, Apps Script
-    вернёт сохранённый результат без повторного изменения таблицы.
-    """
-    payload = {
-        "action": "syncParticipants",
-        "members": members,
-        "syncId": sync_id,
-        "password": GOOGLE_SCRIPT_PASSWORD,
-    }
-    last_error = None
-
-    for attempt in range(1, 3):
-        try:
-            print(
-                f"PARTICIPANTS GOOGLE ATTEMPT {attempt}/2 sync_id={sync_id}",
-                flush=True,
-            )
-            r = requests.post(
-                GOOGLE_SCRIPT_URL,
-                json=payload,
-                timeout=(5, 12),
-            )
-            r.raise_for_status()
-            result = r.json()
-            print(
-                f"PARTICIPANTS GOOGLE OK attempt={attempt} sync_id={sync_id}",
-                flush=True,
-            )
-            return result
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_error = exc
-            print(
-                f"PARTICIPANTS GOOGLE RESPONSE LOST attempt={attempt}/2 "
-                f"sync_id={sync_id}: {exc!r}",
-                flush=True,
-            )
-            if attempt < 2:
-                time.sleep(1.0)
-
-    raise last_error or RuntimeError("Google participants sync failed")
+    return google_post({"action": "syncParticipants", "members": members, "syncId": sync_id})
     
 
 @app.route("/sync-participants-silent", methods=["POST"])
@@ -1775,3 +1670,4 @@ def quest_tick_route():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+

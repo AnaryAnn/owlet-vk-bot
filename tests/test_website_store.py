@@ -41,16 +41,18 @@ class MemorySheets:
             result[title] = {'sheetId': self.ids[key]}
         return result
 
-    def ensure_tab(self, book, title, headers):
+    def ensure_tab(self, book, title, headers, hidden=True):
         self.books[book].setdefault(title, [headers])
         return self.tabs(book)[title]['sheetId']
 
-    def values(self, book, ranges):
+    def values(self, book, ranges, formatted=False):
         result = []
         for r in ranges:
             title, area = r.rsplit('!', 1)
             rows = self.books[book][title.strip("'")]
-            if area.startswith('A8'): values = rows[7:]
+            if area == 'B2': values = [rows[1][1:2]] if len(rows) > 1 else []
+            elif area.startswith('A8'): values = rows[7:]
+            elif area == 'A:Z': values = rows
             elif area.startswith('C'):
                 index = int(area[1:]) - 1; values = [rows[index][2:3]]
             else: values = rows[1:]
@@ -62,18 +64,24 @@ class MemorySheets:
             raise requests.Timeout('тест')
         self.batches.append(copy.deepcopy(writes))
         for write in writes:
+            if 'addSheet' in write:
+                properties = write['addSheet']['properties']
+                self.books[book][properties['title']] = []
+                self.ids[(book, properties['title'])] = properties['sheetId']
+                continue
             obj = write.get('updateCells') or write.get('appendCells')
             sid = obj.get('sheetId') or obj['start']['sheetId']
             title = next(t for (b, t), i in self.ids.items() if b == book and i == sid)
-            values = [next(iter(c['userEnteredValue'].values())) for c in obj['rows'][0]['values']]
             rows = self.books[book][title]
-            if 'appendCells' in write:
-                rows.append(values)
-            else:
-                row, col = obj['start']['rowIndex'], obj['start']['columnIndex']
-                while len(rows) <= row: rows.append([])
-                rows[row].extend([''] * max(0, col + len(values) - len(rows[row])))
-                rows[row][col:col + len(values)] = values
+            for offset, rowdata in enumerate(obj['rows']):
+                values = [next(iter(c['userEnteredValue'].values())) for c in rowdata['values']]
+                if 'appendCells' in write:
+                    rows.append(values)
+                else:
+                    row, col = obj['start']['rowIndex'] + offset, obj['start']['columnIndex']
+                    while len(rows) <= row: rows.append([])
+                    rows[row].extend([''] * max(0, col + len(values) - len(rows[row])))
+                    rows[row][col:col + len(values)] = values
 
 
 def report_payload(**kwargs):

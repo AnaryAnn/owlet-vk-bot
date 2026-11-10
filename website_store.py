@@ -102,15 +102,15 @@ class Sheets:
         r.raise_for_status()
         return r.json()
 
-    def values(self, book, ranges):
+    def values(self, book, ranges, formatted=False):
         return [v.get('values', []) for v in self.get(book, '/values:batchGet',
-            ranges=ranges, valueRenderOption='UNFORMATTED_VALUE').get('valueRanges', [])]
+            ranges=ranges, valueRenderOption='FORMATTED_VALUE' if formatted else 'UNFORMATTED_VALUE').get('valueRanges', [])]
 
     def tabs(self, book):
         return {s['properties']['title']: s['properties'] for s in self.get(book,
             fields='sheets.properties').get('sheets', [])}
 
-    def ensure_tab(self, book, title, headers):
+    def ensure_tab(self, book, title, headers, hidden=True):
         tabs = self.tabs(book)
         if title in tabs:
             return tabs[title]['sheetId']
@@ -119,7 +119,7 @@ class Sheets:
         while new_id in used:
             new_id = random.SystemRandom().randrange(1, 2**30)
         self.batch(book, [{'addSheet': {'properties': {
-            'sheetId': new_id, 'title': title, 'hidden': True}}},
+            'sheetId': new_id, 'title': title, 'hidden': hidden}}},
             update(new_id, 0, 0, headers)])
         return new_id
 
@@ -177,8 +177,9 @@ def save_report(api, name, plan, fact, report_id):
             raise ValueError('Участник выбыл из беседы')
         title = week['sheetName']
         if title not in tabs:
-            # Создание недели пока остаётся у существующего бота/синхронизации.
-            raise Busy('Текущая неделя ещё не создана. Запустите синхронизацию участников')
+            from native_storage import ensure_week
+            ensure_week(api, participants)
+            tabs = api.tabs(SHEET_ID)
         rows = api.values(SHEET_ID, [f'{_quote(title)}!A8:D'])[0]
         matches = [(i + 7, r) for i, r in enumerate(rows) if r and str(r[0]).strip() == name]
         if len(matches) != 1:

@@ -12,6 +12,93 @@ _lock = threading.Lock()
 _cache = {"data": None, "expires": 0, "week": None}
 
 
+def _admin():
+    try:
+        supplied = base64.b64decode(request.headers.get('X-Website-Password', ''), validate=True)
+    except ValueError:
+        return False
+    expected = os.environ.get('WEBSITE_ADMIN_PASSWORD', '').encode()
+    return bool(expected) and hmac.compare_digest(supplied, expected)
+
+
+@website_api.route('/api/website/login', methods=['GET', 'OPTIONS'])
+def website_login():
+    if request.method == 'OPTIONS': return '', 204
+    if not _authorized(): return jsonify(success=False, unauthorized=True, error='Неверный пароль'), 401
+    return jsonify(success=True, isAdmin=_admin())
+
+
+@website_api.route('/api/website/settings', methods=['GET', 'POST', 'OPTIONS'])
+def website_settings():
+    if request.method == 'OPTIONS': return '', 204
+    if not _authorized(): return jsonify(success=False, unauthorized=True), 401
+    if not _admin(): return jsonify(success=False, forbidden=True, error='Настройки доступны только администратору'), 403
+    try:
+        from native_storage import stats_get, stats_post
+        if request.method == 'GET': return jsonify(stats_get({'action': 'settings'}))
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict): return jsonify(success=False, error='Ожидается JSON'), 400
+        return jsonify(stats_post({'action': 'saveGoal', 'goal': data.get('goal')}))
+    except ValueError as exc: return jsonify(success=False, error=str(exc)), 400
+    except Exception:
+        current_app.logger.exception('Native website settings failed')
+        return jsonify(success=False, error='Настройки временно недоступны'), 503
+
+
+@website_api.route('/api/website/bonus', methods=['POST', 'OPTIONS'])
+def website_bonus():
+    if request.method == 'OPTIONS': return '', 204
+    if not _authorized(): return jsonify(success=False, unauthorized=True), 401
+    if not _admin(): return jsonify(success=False, forbidden=True), 403
+    try:
+        from native_storage import enabled
+        enabled()
+        from native_bonus import award
+        from app import build_weekly_bonus_candidates, vk_send, STATS_PEER_ID
+        data = request.get_json(silent=True) or {}
+        threshold = data.get('threshold')
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1e9:
+            raise ValueError('Некорректный порог')
+        if not isinstance(data.get('preview', True), bool): raise ValueError('preview должен быть boolean')
+        result = award(build_weekly_bonus_candidates(threshold, data.get('week', 'current')),
+            threshold, str(data.get('rarity', 'необычный')), str(data.get('campaign', '')),
+            preview=data.get('preview', True))
+        if result.get('awarded'):
+            text = '🦉 РОБОСЫЧИК. ВНЕОЧЕРЕДНАЯ ВЫДАЧА АРТЕФАКТОВ!\n\n'
+            text += f"🐭 За факт строго больше {threshold} мышей награду получили {result['awardedCount']} сычиков!\n"
+            text += '\n'.join(f"🎁 {p['name']} ({p['fact']} 🐭) — {p['artifact']}" for p in result['awarded'])
+            try:
+                vk_send(STATS_PEER_ID, text); result['announced'] = True
+            except Exception:
+                result['announced'] = False
+                result['warning'] = 'Артефакты выданы, сообщение не подтверждено'
+        return jsonify(result)
+    except ValueError as exc: return jsonify(success=False, error=str(exc)), 400
+    except Exception:
+        current_app.logger.exception('Native bonus failed')
+        return jsonify(success=False, error='Выдача не подтверждена. Проверьте журнал'), 503
+
+
+@website_api.route('/api/website/treasury', methods=['GET', 'OPTIONS'])
+def website_treasury():
+    if request.method == 'OPTIONS': return '', 204
+    if not _authorized(): return jsonify(success=False, unauthorized=True), 401
+    return public_treasury()
+
+
+@website_api.route('/api/treasury', methods=['GET', 'OPTIONS'])
+def public_treasury():
+    # Старый отдельный сайт имел публичный read-only API. Каталог целиком не выдаём.
+    if request.method == 'OPTIONS': return '', 204
+    try:
+        from native_treasury import read
+        return jsonify(read(request.args.get('action', 'collection'), request.args.get('vkId', '0')))
+    except ValueError as exc: return jsonify(ok=False, error=str(exc)), 400
+    except Exception:
+        current_app.logger.exception('Native treasury failed')
+        return jsonify(ok=False, error='Сокровищница временно недоступна'), 503
+
+
 def _authorized():
     try:
         supplied = base64.b64decode(request.headers.get('X-Website-Password', ''),
@@ -90,14 +177,15 @@ def website_current():
     if not _authorized():
         return jsonify(success=False, unauthorized=True), 401
     try:
-        data = read_current_stats()
-        matches = [r for r in data['currentRecords'] if r['name'] == request.args.get('name')]
-        if len(matches) > 1:
-            return jsonify(success=False, error='Неоднозначное имя'), 409
-        return jsonify(success=True, week=data['currentWeek'], record=matches[0] if matches else None)
+        from native_storage import stats_get
+        return jsonify(stats_get({'action': 'current', 'name': request.args.get('name', '')}))
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
     except Exception:
         current_app.logger.exception('Website current record failed')
         return jsonify(success=False, error='Не удалось прочитать запись'), 503
+
+
 
 @website_api.route('/api/website/stats', methods=['GET', 'OPTIONS'])
 def website_stats():
