@@ -1,4 +1,4 @@
-"""Isolated read-only Flask blueprint for the website. No bot handlers changed."""
+"""Изолированные API сайта. Новая запись выключена до согласованного перехода."""
 import os
 import threading
 import time
@@ -10,6 +10,94 @@ from sheets_api import read_current_stats, current_week
 website_api = Blueprint("website_api", __name__)
 _lock = threading.Lock()
 _cache = {"data": None, "expires": 0, "week": None}
+
+
+def _authorized():
+    try:
+        supplied = base64.b64decode(request.headers.get('X-Website-Password', ''),
+                                   validate=True).decode('utf-8')
+    except (ValueError, UnicodeError):
+        return False
+    return any(p and hmac.compare_digest(supplied.encode(), p.encode()) for p in
+        (os.environ.get('WEBSITE_SITE_PASSWORD', ''), os.environ.get('WEBSITE_ADMIN_PASSWORD', '')))
+
+
+@website_api.after_request
+def website_headers(response):
+    allowed = os.environ.get('WEBSITE_ALLOWED_ORIGIN', 'https://anaryann.github.io')
+    if request.headers.get('Origin', '') == allowed:
+        response.headers['Access-Control-Allow-Origin'] = allowed
+        response.vary.add('Origin')
+        response.headers['Access-Control-Allow-Headers'] = 'X-Website-Password, Content-Type'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@website_api.route('/api/website/records', methods=['POST', 'OPTIONS'])
+def website_record():
+    if request.method == 'OPTIONS':
+        return '', 204
+    if not _authorized():
+        return jsonify(success=False, unauthorized=True), 401
+    if os.environ.get('WEBSITE_WRITE_ENABLED', '').lower() != 'true':
+        return jsonify(success=False, error='Внесение через Python ещё не включено'), 503
+    if request.content_length is None or request.content_length > 4096:
+        return jsonify(success=False, error='Некорректный размер запроса'), 413
+    from website_store import submit_report, Busy, Conflict, Uncertain
+    try:
+        data = request.get_json(silent=True)
+        result = submit_report(data)
+        with _lock:
+            _cache.update(data=None, expires=0, week=None)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+    except Conflict as exc:
+        return jsonify(success=False, error=str(exc)), 409
+    except Busy as exc:
+        return jsonify(success=False, error=str(exc)), 503
+    except Uncertain:
+        return jsonify(success=False, uncertain=True,
+                       error='Результат записи уточняется. Повторите тот же запрос'), 503
+    except Exception:
+        current_app.logger.exception('Website record failed')
+        return jsonify(success=False, error='Не удалось подтвердить запись. Повторите тот же запрос'), 503
+
+
+@website_api.route('/api/website/participants', methods=['GET', 'OPTIONS'])
+def website_participants():
+    if request.method == 'OPTIONS':
+        return '', 204
+    if not _authorized():
+        return jsonify(success=False, unauthorized=True), 401
+    try:
+        from website_store import Sheets
+        from sheets_api import _session, SHEET_ID
+        with _session() as session:
+            rows = Sheets(session).values(SHEET_ID, ["'Участники'!A2:C"])[0]
+        return jsonify(success=True, people=sorted(str(r[0]).strip() for r in rows
+            if r and str(r[0]).strip()))
+    except Exception:
+        current_app.logger.exception('Website participants failed')
+        return jsonify(success=False, error='Не удалось загрузить участников'), 503
+
+
+@website_api.route('/api/website/current', methods=['GET', 'OPTIONS'])
+def website_current():
+    if request.method == 'OPTIONS':
+        return '', 204
+    if not _authorized():
+        return jsonify(success=False, unauthorized=True), 401
+    try:
+        data = read_current_stats()
+        matches = [r for r in data['currentRecords'] if r['name'] == request.args.get('name')]
+        if len(matches) > 1:
+            return jsonify(success=False, error='Неоднозначное имя'), 409
+        return jsonify(success=True, week=data['currentWeek'], record=matches[0] if matches else None)
+    except Exception:
+        current_app.logger.exception('Website current record failed')
+        return jsonify(success=False, error='Не удалось прочитать запись'), 503
 
 @website_api.route('/api/website/stats', methods=['GET', 'OPTIONS'])
 def website_stats():
