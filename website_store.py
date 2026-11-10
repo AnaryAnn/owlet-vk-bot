@@ -16,6 +16,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from report_comments import append_overplan_comment
 from sheets_api import _session, _quote, _number, current_week, SHEET_ID, TIMEZONE
 
 ARTIFACTS_ID = os.environ.get('ARTIFACTS_SPREADSHEET_ID',
@@ -268,6 +269,7 @@ def send_notification(report):
         message += f"\n\n{artifact.get('emoji', '✨')} Выпал артефакт: {artifact['name']}"
         if artifact.get('description'):
             message += '\n' + artifact['description']
+    message = append_overplan_comment(message, report['plan'], report['fact'], report['requestId'])
     random_id = int.from_bytes(hashlib.sha256(report['requestId'].encode()).digest()[:4], 'big') & 0x7fffffff
     payload = {'access_token': os.environ.get('VK_TOKEN', ''), 'v': '5.199',
         'peer_id': 2000000002, 'random_id': random_id or 1, 'message': message}
