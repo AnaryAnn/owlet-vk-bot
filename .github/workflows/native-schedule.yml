@@ -1,0 +1,33 @@
+name: Расписание Робосычика без Apps Script
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+permissions: {}
+concurrency:
+  group: native-owlet-schedule
+  cancel-in-progress: false
+jobs:
+  tick:
+    if: vars.NATIVE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Проверить задания на Render
+        env:
+          OWLET_SCHEDULE_SECRET: ${{ secrets.OWLET_SCHEDULE_SECRET }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          secret = os.environ.get('OWLET_SCHEDULE_SECRET', '')
+          if not secret:
+              raise SystemExit('Не настроен OWLET_SCHEDULE_SECRET')
+          request = urllib.request.Request(
+              'https://owlet-vk-bot.onrender.com/native-schedule', data=b'{}',
+              headers={'Content-Type': 'application/json', 'X-Schedule-Secret': secret}, method='POST')
+          with urllib.request.urlopen(request, timeout=170) as response:
+              result = json.load(response)
+          if not result.get('success'):
+              raise SystemExit('Задание не подтвердило успех. Проверьте журнал Render')
+          print('Проверка расписания выполнена, заданий:', len(result.get('jobs', [])))
+          PY

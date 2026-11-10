@@ -13,12 +13,13 @@ SHEET_ID = os.environ.get("STATS_SPREADSHEET_ID", "1S1tcMNZj84rLAQi_zPrPT-yxP0b6
 TIMEZONE = os.environ.get("STATS_TIMEZONE", "Europe/Moscow")
 
 
-def _session():
+def _session(write=False):
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not raw:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
     info = json.loads(raw)
-    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"] if write else SCOPES
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     return AuthorizedSession(creds)
 
 

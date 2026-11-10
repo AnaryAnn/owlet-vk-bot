@@ -1,20 +1,12 @@
-"""Phase 1: collective quests. Separate Google Apps Script storage."""
+"""Коллективные квесты. Состояние хранится через Google Sheets API."""
 import os
 import requests
 
-QUEST_URL = os.environ.get('QUEST_SCRIPT_URL', '').strip()
-QUEST_PASSWORD = os.environ.get('QUEST_SCRIPT_PASSWORD', '').strip()
 
 
 def quest_api(action, **kwargs):
-    if not QUEST_URL or not QUEST_PASSWORD:
-        raise RuntimeError('QUEST_SCRIPT_URL / QUEST_SCRIPT_PASSWORD not configured')
-    response = requests.post(QUEST_URL, json={'action': action, 'password': QUEST_PASSWORD, **kwargs}, timeout=(5, 30))
-    response.raise_for_status()
-    data = response.json()
-    if not data.get('success'):
-        raise RuntimeError(data.get('error', 'Quest API failed'))
-    return data
+    from native_quests import dispatch
+    return dispatch(action, **kwargs)
 
 
 def tick(stats_loader, vk_sender, peer_id, dry_run=False):
@@ -41,3 +33,4 @@ def tick(stats_loader, vk_sender, peer_id, dry_run=False):
         quest_api('ack', eventId=item['eventId'])
         sent.append(item['eventId'])
     return {'success': True, 'fact': total_fact, 'percent': percent, 'sent': sent, 'pending': len(payload.get('outbox', []))}
+
