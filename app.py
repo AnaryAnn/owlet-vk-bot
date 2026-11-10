@@ -10,6 +10,7 @@ import requests
 from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
 from quest_milestones import send_milestones
+from report_comments import append_overplan_comment
 
 app = Flask(__name__)
 from website_api import website_api
@@ -731,6 +732,7 @@ def send_report_confirmation_background(
             # Артефакт не должен задерживать или ломать подтверждение отчёта.
             print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
 
+    message = append_overplan_comment(message, plan, fact, report_id)
     report_diag(report_id, "vk_send_start", started, has_attachment=bool(attachment))
     send_t0 = time.monotonic()
     vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
