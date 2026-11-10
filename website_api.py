@@ -19,7 +19,7 @@ def website_stats():
     else:
         supplied = request.headers.get('X-Website-Password', '')
         valid = [os.environ.get('WEBSITE_SITE_PASSWORD', ''), os.environ.get('WEBSITE_ADMIN_PASSWORD', '')]
-        if not any(p and hmac.compare_digest(supplied, p) for p in valid):
+        if not any(p and hmac.compare_digest(supplied.encode("utf-8"), p.encode("utf-8")) for p in valid):
             response = jsonify({"success": False, "unauthorized": True})
             response.status_code = 401
         else:
