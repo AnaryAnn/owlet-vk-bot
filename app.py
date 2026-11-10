@@ -1099,8 +1099,8 @@ def native_schedule():
     if not SCHEDULE_SECRET or not hmac.compare_digest(supplied, SCHEDULE_SECRET):
         return jsonify(success=False, error='forbidden'), 403
     try:
-        from native_jobs import due_jobs, run
-        schedule = json.loads(os.environ.get('NATIVE_SCHEDULES_JSON', '[]'))
+        from native_jobs import due_jobs, run, configured_schedule
+        schedule = configured_schedule()
         results = []
         for job in due_jobs(schedule):
             try: results.append(run(job))

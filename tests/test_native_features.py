@@ -5,7 +5,7 @@ from unittest.mock import patch
 from native_quests import quest_action, table
 from native_treasury import build
 from native_storage import people, records, formulas
-from native_jobs import run, due_jobs
+from native_jobs import run, due_jobs, configured_schedule
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -123,7 +123,14 @@ class NativeUtilityTests(unittest.TestCase):
         result=run('statistics',dry_run=True)
         self.assertTrue(result['dryRun']);self.assertIn('statistics:',result['key'])
     def test_schedule_uses_confirmed_timezone_and_time(self):
-        schedule=[{'job':'statistics','hour':19,'weekdays':[0,5,6]}]
-        self.assertEqual(due_jobs(schedule,datetime(2026,11,9,18,59,tzinfo=ZoneInfo('Europe/Moscow'))),[])
-        self.assertEqual(due_jobs(schedule,datetime(2026,11,9,19,5,tzinfo=ZoneInfo('Europe/Moscow'))),['statistics'])
+        with patch.dict('os.environ',{},clear=True): schedule=configured_schedule()
+        tz=ZoneInfo('Europe/Moscow')
+        for day in (6,7,8,9):
+            self.assertIn('statistics',due_jobs(schedule,datetime(2026,11,day,18,0,tzinfo=tz)))
+        for day in (10,11,12):
+            self.assertNotIn('statistics',due_jobs(schedule,datetime(2026,11,day,18,0,tzinfo=tz)))
+        self.assertNotIn('statistics',due_jobs(schedule,datetime(2026,11,9,17,59,tzinfo=tz)))
+        for hour in (0,4,8,12,16,20):
+            self.assertIn('sync',due_jobs(schedule,datetime(2026,11,9,hour,0,tzinfo=tz)))
+        self.assertNotIn('sync',due_jobs(schedule,datetime(2026,11,9,2,0,tzinfo=tz)))
         self.assertEqual(due_jobs([],datetime.now()),[])

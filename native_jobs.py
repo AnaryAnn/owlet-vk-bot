@@ -7,12 +7,21 @@ import argparse
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from pathlib import Path
+import os
 
 from sheets_api import _session, SHEET_ID, TIMEZONE
 from website_store import Sheets, append, update, stamp
 from native_storage import enabled
 
 JOBS = ('morning', 'evening', 'statistics', 'sync', 'quests', 'cleanup')
+
+
+def configured_schedule():
+    override = os.environ.get('NATIVE_SCHEDULES_JSON')
+    if override is not None:
+        return json.loads(override)
+    return json.loads(Path(__file__).with_name('native_schedule.json').read_text())
 
 
 def due_jobs(schedule, now=None):
