@@ -5,7 +5,7 @@ import time
 import hmac
 import base64
 from flask import Blueprint, jsonify, request, make_response, current_app
-from sheets_api import read_current_stats, current_week
+from sheets_api import read_current_stats, current_week, read_stats_history
 
 website_api = Blueprint("website_api", __name__)
 _lock = threading.Lock()
@@ -242,3 +242,27 @@ def website_stats():
     response.headers['Cache-Control'] = 'no-store'
     return response
 
+
+
+_history_cache = {"data": None, "expires": 0, "week": None}
+_history_lock = threading.Lock()
+
+
+@website_api.route('/api/website/history', methods=['GET', 'OPTIONS'])
+def website_history():
+    if request.method == 'OPTIONS':
+        return '', 204
+    if not _authorized():
+        return jsonify(success=False, unauthorized=True), 401
+    try:
+        with _history_lock:
+            week = current_week()['start']
+            if (_history_cache['data'] is None or time.monotonic() >= _history_cache['expires']
+                    or _history_cache['week'] != week):
+                _history_cache['data'] = read_stats_history()
+                _history_cache['expires'] = time.monotonic() + 300
+                _history_cache['week'] = week
+            return jsonify(_history_cache['data'])
+    except Exception:
+        current_app.logger.exception('Website history load failed')
+        return jsonify(success=False, error='Не удалось загрузить историю'), 503

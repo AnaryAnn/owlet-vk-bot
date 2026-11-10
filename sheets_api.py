@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -87,3 +88,60 @@ def read_current_stats(week=None):
             "weeks": [{"sheetName": week["sheetName"], "weekStart": week["start"],
                        "weekEnd": week["end"], "goal": goal, "records": records}]}
 
+
+
+def _history_week(title):
+    """Распознаём только недельные листы, включая переход через Новый год."""
+    if not re.fullmatch(r"\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}", title):
+        return None
+    try:
+        start_text, end_text = title.split('-')
+        end = datetime.strptime(end_text, '%d.%m.%y').date()
+        start = datetime.strptime(start_text + f'.{end.year}', '%d.%m.%Y').date()
+        if start > end:
+            start = start.replace(year=end.year - 1)
+        if (end - start).days != 6 or start.weekday() != 1:
+            return None
+        return dict(sheetName=title, weekStart=start.isoformat(), weekEnd=end.isoformat())
+    except ValueError:
+        return None
+
+
+def read_stats_history():
+    """Только чтение: список недель и их отчёты, пакетами по 40 листов."""
+    with _session() as session:
+        base = f'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}'
+        response = session.get(base, params={'fields': 'sheets.properties.title'}, timeout=25)
+        response.raise_for_status()
+        weeks = [w for sheet in response.json().get('sheets', [])
+                 if (w := _history_week(sheet.get('properties', {}).get('title', '')))]
+        weeks = sorted((w for w in weeks if w['weekStart'] <= current_week()['start']),
+                       key=lambda w: w['weekStart'])
+        for offset in range(0, len(weeks), 40):
+            batch = weeks[offset:offset + 40]
+            ranges = [f"{_quote(w['sheetName'])}!{cells}" for w in batch for cells in ('B2', 'A8:D')]
+            response = session.get(base + '/values:batchGet', params={
+                'ranges': ranges, 'valueRenderOption': 'FORMATTED_VALUE'}, timeout=25)
+            response.raise_for_status()
+            values = response.json().get('valueRanges', [])
+            if len(values) != len(ranges):
+                raise RuntimeError('Unexpected history response')
+            for i, week in enumerate(batch):
+                goal_rows = values[2*i].get('values', [])
+                goal = goal_rows[0][0] if goal_rows and goal_rows[0] else ''
+                week['goal'] = _number(goal) if str(goal).strip() else None
+                records = []
+                for row in values[2*i+1].get('values', []):
+                    if not row or not str(row[0]).strip():
+                        continue
+                    plan = row[1] if len(row) > 1 else ''
+                    fact = row[2] if len(row) > 2 else ''
+                    if not str(plan).strip() and not str(fact).strip():
+                        continue
+                    records.append(dict(name=str(row[0]).strip(), plan=_number(plan), fact=_number(fact),
+                        weekStart=week['weekStart'], weekEnd=week['weekEnd'],
+                        updated=str(row[3]) if len(row) > 3 else ''))
+                week['records'] = records
+                week['totalMice'] = sum(r['fact'] for r in records)
+                week['activeOwlets'] = len({r['name'] for r in records if r['fact'] > 0})
+    return dict(success=True, weeks=weeks, currentWeek=current_week())
