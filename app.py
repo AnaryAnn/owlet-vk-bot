@@ -1016,7 +1016,8 @@ def generate_scheduled_digest(edition):
             "Digest storage did not respond after 3 attempts"
         )
     if result.get("alreadySent"):
-        return dict(success=True, skipped=True, edition=edition)
+        return dict(success=True, skipped=True, reason="already_sent", edition=edition,
+                    peer_id=peer_id, cutoff=cutoff.isoformat())
     messages = filter_digest_messages(result.get("messages") or [])
     print("SYCHEVESTNIK BUFFER:", len(messages), "messages", flush=True)
 
@@ -1032,6 +1033,7 @@ def generate_scheduled_digest(edition):
         "edition": edition,
         "peer_id": peer_id,
         "messages": len(messages),
+        "cutoff": cutoff.isoformat(),
         "attachment": attachment,
         "vk_response": vk_result.get("response"),
     }
@@ -1106,7 +1108,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1",
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1117,14 +1119,28 @@ def native_schedule():
         return jsonify(success=False, error='forbidden'), 403
     try:
         from native_jobs import due_jobs, run, configured_schedule
-        schedule = configured_schedule()
+        data = request.get_json(silent=True) or {}
+        requested = data.get('jobs')
+        if requested is not None and (not isinstance(requested, list) or not requested
+                or len(requested) > 3 or any(j not in ('evening', 'statistics', 'sync') for j in requested)):
+            return jsonify(success=False, error='Некорректный список заданий'), 400
+        schedule = configured_schedule() if requested is None else []
         results = []
-        for job in due_jobs(schedule):
-            try: results.append(run(job))
+        for job in (list(dict.fromkeys(requested)) if requested is not None else due_jobs(schedule)):
+            try:
+                # У выпуска собственная отметка успешной отправки в _DigestState.
+                # Явный вызов не зависит от старого расписания и окна 18:00–18:30.
+                if job == 'evening' and requested is not None:
+                    results.append(dict(job=job, **generate_scheduled_digest('evening')))
+                else:
+                    results.append(run(job))
             except Exception:
                 app.logger.exception('Native scheduled job failed: %s', job)
                 results.append(dict(success=False, job=job, error='Нужна проверка журнала _NativeJobs'))
-        return jsonify(success=all(r.get('success') for r in results), jobs=results)
+        response = dict(success=all(r.get('success') for r in results), jobs=results)
+        if requested is not None:
+            response["schedulerVersion"] = 2
+        return jsonify(response)
     except (ValueError, TypeError):
         return jsonify(success=False, error='Некорректная конфигурация расписания'), 503
 

@@ -37,3 +37,29 @@ class EveningTests(unittest.TestCase):
                 app.generate_scheduled_digest('evening')
         self.assertEqual(storage.call_count, 1)
         self.assertEqual(storage.call_args.args[0]['action'], 'getEditionMessages')
+
+
+class ExplicitScheduleTests(unittest.TestCase):
+    def test_explicit_evening_ignores_empty_override_and_time_window(self):
+        with patch.object(app, 'SCHEDULE_SECRET', 'test'), \
+             patch.dict('os.environ', {'NATIVE_SCHEDULES_JSON': '[]'}), \
+             patch.object(app, 'generate_scheduled_digest', return_value={'success': True, 'vk_response': 42}) as generate:
+            result = app.app.test_client().post('/native-schedule', json={'jobs': ['evening']},
+                headers={'X-Schedule-Secret': 'test'})
+        self.assertEqual(result.status_code, 200)
+        generate.assert_called_once_with('evening')
+        self.assertEqual(result.json['jobs'][0]['vk_response'], 42)
+
+    def test_unknown_explicit_job_rejected(self):
+        with patch.object(app, 'SCHEDULE_SECRET', 'test'):
+            result = app.app.test_client().post('/native-schedule', json={'jobs': ['invalid']},
+                headers={'X-Schedule-Secret': 'test'})
+        self.assertEqual(result.status_code, 400)
+
+    def test_duplicate_explicit_job_sent_once(self):
+        with patch.object(app, 'SCHEDULE_SECRET', 'test'), \
+             patch.object(app, 'generate_scheduled_digest', return_value={'success': True}) as generate:
+            result = app.app.test_client().post('/native-schedule', json={'jobs': ['evening', 'evening']},
+                headers={'X-Schedule-Secret': 'test'})
+        self.assertTrue(result.json['success'])
+        generate.assert_called_once()
