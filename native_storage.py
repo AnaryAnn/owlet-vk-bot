@@ -236,6 +236,27 @@ def digest_post(data):
         with api.locked(ARTIFACTS_ID):
             sid = api.ensure_tab(ARTIFACTS_ID, 'ChatLog', ['timestamp', 'peer_id', 'from_id', 'name', 'text', 'event_id'])
             rows = api.values(ARTIFACTS_ID, ["'ChatLog'!A2:F"])[0]
+            if action in ('getEditionMessages', 'completeEdition'):
+                peer = str(data.get('peerId', ''))
+                until = float(data['until'])
+                state_sid = api.ensure_tab(ARTIFACTS_ID, '_DigestState', ['peer_id', 'until'])
+                states = api.values(ARTIFACTS_ID, ["'_DigestState'!A2:B"])[0]
+                match = next(((i, r) for i, r in enumerate(states, 1) if r and str(r[0]) == peer), None)
+                previous = float(match[1][1]) if match else until - 86400
+                if action == 'getEditionMessages':
+                    messages = [dict(timestamp=float(r[0]), peerId=str(r[1]), fromId=str(r[2]),
+                        name=str(r[3]), text=str(r[4])) for r in rows if len(r) > 4
+                        and str(r[1]) == peer and previous < float(r[0]) <= until]
+                    return dict(success=True, alreadySent=bool(match and previous >= until),
+                        messages=sorted(messages, key=lambda m: m['timestamp']))
+                if match and previous >= until:
+                    return dict(success=True, duplicate=True)
+                keep = [r for r in rows if r and (str(r[1]) != peer or float(r[0]) > until)]
+                writes = [update(state_sid, match[0], 0, [peer, until]) if match else append(state_sid, [peer, until])]
+                if rows:
+                    writes.append(write_rows(sid, 1, keep + [[''] * 6] * (len(rows) - len(keep))))
+                api.batch(ARTIFACTS_ID, writes)
+                return dict(success=True, deleted=len(rows) - len(keep))
             if action == 'saveMessage':
                 event = str(data.get('eventId') or '')
                 if event and any(len(r) > 5 and str(r[5]) == event for r in rows): return dict(success=True, duplicate=True)

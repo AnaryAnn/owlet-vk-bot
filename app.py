@@ -6,6 +6,8 @@ import math
 import time
 import json
 import hmac
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from uuid import uuid4
 import requests
 from flask import Flask, request, Response, jsonify
@@ -31,14 +33,13 @@ def report_diag(report_id, stage, started=None, **extra):
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip()
 VK_CONFIRMATION_CODE = os.environ.get("VK_CONFIRMATION_CODE", "").strip()
-# Временно отключаем архивирование сообщений для Сычевестника.
-# Чтобы вернуть сбор, установите SAVE_CHAT_MESSAGES=true в Render.
-SAVE_CHAT_MESSAGES = os.environ.get("SAVE_CHAT_MESSAGES", "false").strip().lower() in ("1", "true", "yes", "on")
+# Сбор для ежедневного выпуска. Явное SAVE_CHAT_MESSAGES=false отключает его.
+SAVE_CHAT_MESSAGES = os.environ.get("SAVE_CHAT_MESSAGES", "true").strip().lower() in ("1", "true", "yes", "on")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 SYCHEVESTNIK_PEER_ID = 2000000002
 STATS_PEER_ID = 2000000002
 MORNING_PHOTO = "photo-241605282_457239021"
-EVENING_PHOTO = "photo-241605282_457239023"
+EVENING_PHOTO = os.environ.get("EVENING_PHOTO", "photo-241605282_457239023").strip()
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
@@ -295,13 +296,13 @@ def build_local_digest(useful):
 
 
 def build_digest(messages):
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured")
-
     useful = []
     for item in messages:
         text = (item.get("text") or "").strip()
-        name = (item.get("name") or item.get("fromId") or "Участник").strip()
+        name = str(item.get("name") or "Участник").strip()
+        parts = name.split()
+        if len(parts) > 1:
+            name = parts[0] + " " + " ".join(p[0] + "." for p in parts[1:])
 
         if not text:
             continue
@@ -315,9 +316,12 @@ def build_digest(messages):
     if not useful:
         return (
             "📰 Сычевестник\n\n"
-            "За последние 12 часов Робосычик не нашёл достаточно "
+            "За этот выпуск Робосычик не нашёл достаточно "
             "обычных сообщений для дайджеста. 🤖"
         )
+
+    if not OPENROUTER_API_KEY:
+        return build_local_digest(useful)
 
     transcript = "\n".join(useful)
 
@@ -332,6 +336,8 @@ def build_digest(messages):
 Никогда не пиши фразы вроде Let's craft, Line1, Line2, space=, approximate, make sure, we need to.
 
 Используй только факты из переданной переписки. Ничего не выдумывай.
+Выбирай главные темы, шутки, достижения и планы. Имена оставляй, фамилии пиши только инициалами.
+Даже по паре сообщений составь короткий выпуск без выдуманных событий.
 Старайся выбрать 4-6 действительно содержательных событий.
 Если в переписке есть минимум 4 содержательные темы, ОБЯЗАТЕЛЬНО дай минимум 4 пункта.
 Не объединяй несколько разных тем в один пункт только ради краткости.
@@ -347,7 +353,7 @@ def build_digest(messages):
 Иногда уместны шутки про мармеладных мышей, крестики, вышивальные запасы, факультет, Совиную академию и вычисления Робосычика.
 Не используй длинное тире.
 Каждый пункт должен быть понятен человеку, который не читал чат.
-Ориентир для обычного выпуска: примерно 700-1300 знаков вместе с пунктами и финальной репликой.
+Ориентир для обычного выпуска: примерно 500-900 знаков вместе с пунктами и финальной репликой.
 Не сокращай хороший материал до одного-двух пунктов, если в переписке есть больше содержательных событий.
 
 Формат:
@@ -371,7 +377,7 @@ def build_digest(messages):
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": "Переписка за последние 24 часа:\n\n" + transcript,
+                "content": "Переписка за период выпуска:\n\n" + transcript,
             },
         ],
         "temperature": 0.8,
@@ -966,6 +972,10 @@ def generate_scheduled_digest(edition):
         flush=True,
     )
 
+    cutoff = datetime.now(ZoneInfo("Europe/Moscow")).replace(hour=18, minute=0, second=0, microsecond=0)
+    if cutoff.timestamp() > time.time():
+        cutoff -= timedelta(days=1)
+
     # Google Sheets API может временно отвечать медленно.
     # Не отменяем весь выпуск после первого ReadTimeout: пробуем до 3 раз.
     result = None
@@ -981,9 +991,9 @@ def generate_scheduled_digest(edition):
             )
             result = digest_post(
                 {
-                    "action": "getMessages",
+                    "action": "getEditionMessages",
                     "peerId": str(peer_id),
-                    "hours": 24,
+                    "until": cutoff.timestamp(),
                 },
                 timeout=fetch_timeout,
             )
@@ -1005,6 +1015,8 @@ def generate_scheduled_digest(edition):
         raise last_fetch_error or RuntimeError(
             "Digest storage did not respond after 3 attempts"
         )
+    if result.get("alreadySent"):
+        return dict(success=True, skipped=True, edition=edition)
     messages = filter_digest_messages(result.get("messages") or [])
     print("SYCHEVESTNIK BUFFER:", len(messages), "messages", flush=True)
 
@@ -1012,6 +1024,7 @@ def generate_scheduled_digest(edition):
     print("SYCHEVESTNIK DIGEST READY:", len(digest), "chars", flush=True)
 
     vk_result = vk_send(peer_id, digest, attachment=attachment)
+    digest_post({"action": "completeEdition", "peerId": str(peer_id), "until": cutoff.timestamp()})
     print("SYCHEVESTNIK SENT:", vk_result, flush=True)
 
     return {
