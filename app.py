@@ -6,6 +6,7 @@ import math
 import time
 import json
 import hmac
+from uuid import uuid4
 import requests
 from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
@@ -797,6 +798,7 @@ def sync_chat_participants(peer_id):
     vk_members = vk_get_chat_members(peer_id)
     result = google_post({
         "action": "syncParticipants",
+        "syncId": "chat-sync:" + uuid4().hex,
         "members": [{"vkId": p["vkId"], "name": p["name"]} for p in vk_members],
     })
     if not result.get("success"):
