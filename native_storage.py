@@ -170,9 +170,6 @@ def stats_post(data):
         with _session(write=True) as session:
             api = Sheets(session)
             result, _, _ = save_report(api, values[0], values[1], values[2], str(data['reportId']))
-        if result.get('dailyTask'):
-            from daily_tasks import safe_pending
-            safe_pending(result['vkId'])
         return dict(result, reportId=str(data['reportId']))
     with _session(write=True) as session:
         api = Sheets(session)

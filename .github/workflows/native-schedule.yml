@@ -11,7 +11,6 @@ on:
           - sync
           - statistics
           - quests
-          - daily
   schedule:
     # 18:00 МСК: выпуск и статистика в её дни.
     - cron: '0 15 * * *'
@@ -50,7 +49,7 @@ jobs:
               if datetime.now(ZoneInfo('Europe/Moscow')).weekday() in (0, 4, 5, 6):
                   jobs.append('statistics')
           elif os.environ['CRON'] == '17 * * * *':
-              jobs = ['quests', 'daily']
+              jobs = ['quests']
           else:
               jobs = ['sync']
           print('Запрошены задания:', ', '.join(jobs))
