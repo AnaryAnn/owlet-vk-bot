@@ -1114,7 +1114,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 1,
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
@@ -1426,7 +1426,12 @@ def process_vk_event(data):
         if str(data.get("group_id","")) != VK_GROUP_ID:
             return Response("ok")
         if data.get("type") == "message_event":
-            process_quest_vote_callback(data.get("object") or {})
+            event = data.get('object') or {}
+            if 0 < int(event.get('peer_id') or 0) < 2000000000:
+                from admin_publish import handle_callback
+                handle_callback(event, vk_send, VK_TOKEN)
+            else:
+                process_quest_vote_callback(event)
             return Response("ok")
 
         msg = ((data.get("object") or {}).get("message") or {})
@@ -1434,6 +1439,11 @@ def process_vk_event(data):
         peer_id = msg.get("peer_id")
         text = (msg.get("text") or "").strip()
         event_id = data.get("event_id")
+
+        if user_id and peer_id and 0 < int(peer_id) < 2000000000:
+            from admin_publish import handle_message
+            handle_message(msg, vk_send, VK_TOKEN)
+            return Response('ok')
 
         if not user_id or not peer_id or int(peer_id) < 2000000000:
             return Response("ok")
@@ -1663,7 +1673,8 @@ def vk_callback():
         "event_id=", data.get("event_id"),
         "message_id=", msg.get("id"),
         "peer_id=", msg.get("peer_id"),
-        "text=", repr((msg.get("text") or "")[:160]),
+        "text=", repr('<личное сообщение>' if 0 < int(msg.get('peer_id') or 0) < 2000000000
+                      else (msg.get("text") or "")[:160]),
         flush=True,
     )
     threading.Thread(
@@ -1799,6 +1810,10 @@ def quest_tick_route():
         app.logger.exception("QUEST TICK ERROR")
         return jsonify({"success": False, "error": str(exc)}), 500
 
+
+if os.environ.get('RENDER') == 'true':
+    from admin_publish import prepare as prepare_admin_publish
+    threading.Thread(target=prepare_admin_publish, daemon=True, name='admin-publish-init').start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
