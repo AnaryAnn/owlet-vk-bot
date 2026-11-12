@@ -22,9 +22,11 @@ class HistoryTests(unittest.TestCase):
         titles.json.return_value = {'sheets': [{'properties': {'title': t}} for t in
             ['Участники', '03.11-09.11.26', '10.11-16.11.26', '17.11-23.11.26']]}
         values = MagicMock()
-        values.json.return_value = {'valueRanges': [
-            {'values': [['1 000']]}, {'values': [['Выбыл позже', '20', '30'], ['План', '10', '0'], ['Пустой']]},
-            {'values': []}, {'values': [['Сыч', '1', '2,5'], ['Сыч', '0', '1']]}]}
+        from test_sheets_grid import grid_payload
+        values.json.return_value = grid_payload([
+            "'03.11-09.11.26'!B2", "'03.11-09.11.26'!A8:D", "'10.11-16.11.26'!B2", "'10.11-16.11.26'!A8:D"], [
+            [['1 000']], [['Выбыл позже', '20', '30'], ['План', '10', '0'], ['Пустой']],
+            [], [['Сыч', '1', '2,5'], ['Сыч', '0', '1']]])
         session.get.side_effect = [titles, values]
         with patch.object(sheets, 'current_week', return_value={'start': '2026-11-10'}):
             result = sheets.read_stats_history()

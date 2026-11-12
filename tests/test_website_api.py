@@ -84,15 +84,17 @@ class SheetsTests(unittest.TestCase):
     def test_batch_read_and_session_cleanup(self, factory):
         session = factory.return_value.__enter__.return_value
         response = session.get.return_value
-        response.json.return_value = {'valueRanges': [
-            {'values': [['Тест', '123', 'активен'], ['Выбыл', '456', 'выбыл']]},
-            {'values': [['100']]},
-            {'values': [['Тест', '30', '17', '10.11.2026']]}]}
+        from test_sheets_grid import grid_payload
+        week = sheets.current_week()['sheetName']
+        response.json.return_value = grid_payload(["'Участники'!A2:C", f"'{week}'!B2", f"'{week}'!A8:D"], [
+            [['Тест', '123', 'активен'], ['Выбыл', '456', 'выбыл']],
+            [['100']], [['Тест', '30', '17', '10.11.2026']]])
         result = sheets.read_current_stats()
         self.assertEqual(result['activePeopleCount'], 1)
         self.assertEqual(result['currentRecords'][0]['fact'], 17)
         self.assertEqual(session.get.call_args.kwargs['timeout'], 25)
-        self.assertIn('/values:batchGet', session.get.call_args.args[0])
+        self.assertNotIn('/values:batchGet', session.get.call_args.args[0])
+        self.assertIn('userEnteredValue', session.get.call_args.kwargs['params']['fields'])
         factory.return_value.__exit__.assert_called_once()
         response.raise_for_status.side_effect = RuntimeError('test only')
         with self.assertRaises(RuntimeError):

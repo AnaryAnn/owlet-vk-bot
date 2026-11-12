@@ -107,6 +107,10 @@ class Sheets:
         return r.json()
 
     def values(self, book, ranges, formatted=False):
+        if book == SHEET_ID:
+            from sheets_api import read_value_ranges
+            return [v.get('values', []) for v in read_value_ranges(
+                self.session, book, ranges, formatted=formatted, timeout=20)]
         return [v.get('values', []) for v in self.get(book, '/values:batchGet',
             ranges=ranges, valueRenderOption='FORMATTED_VALUE' if formatted else 'UNFORMATTED_VALUE').get('valueRanges', [])]
 

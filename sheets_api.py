@@ -44,6 +44,21 @@ def _session(write=False):
     return AuthorizedSession(creds)
 
 
+def read_value_ranges(session, book, ranges, formatted=False, timeout=25):
+    base = f'https://sheets.googleapis.com/v4/spreadsheets/{book}'
+    if book == SHEET_ID:
+        from sheets_grid import grid_ranges
+        response = read_response(session, base, params={
+            'ranges': ranges, 'includeGridData': 'true',
+            'fields': 'sheets(properties.title,data(startRow,startColumn,rowData.values.userEnteredValue))'
+        }, timeout=timeout)
+        return grid_ranges(response.json(), ranges, formatted)
+    response = read_response(session, base + '/values:batchGet', params={
+        'ranges': ranges, 'valueRenderOption': 'FORMATTED_VALUE' if formatted else 'UNFORMATTED_VALUE'
+    }, timeout=timeout)
+    return response.json().get('valueRanges', [])
+
+
 def _number(value):
     if value is None or str(value).strip() == "":
         return 0
@@ -72,11 +87,7 @@ def read_current_stats(week=None):
     ranges = [f"{_quote('Участники')}!A2:C", f"{_quote(week['sheetName'])}!B2",
               f"{_quote(week['sheetName'])}!A8:D"]
     with _session() as session:
-        response = read_response(session,
-            f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchGet",
-            params={"ranges": ranges, "valueRenderOption": "FORMATTED_VALUE"}, timeout=25)
-        response.raise_for_status()
-        data = response.json().get("valueRanges", [])
+        data = read_value_ranges(session, SHEET_ID, ranges, formatted=True)
     if len(data) != 3:
         raise RuntimeError("Unexpected Google Sheets response")
     participant_rows = data[0].get("values", [])
@@ -140,10 +151,7 @@ def read_stats_history():
         for offset in range(0, len(weeks), 40):
             batch = weeks[offset:offset + 40]
             ranges = [f"{_quote(w['sheetName'])}!{cells}" for w in batch for cells in ('B2', 'A8:D')]
-            response = read_response(session, base + '/values:batchGet', params={
-                'ranges': ranges, 'valueRenderOption': 'FORMATTED_VALUE'}, timeout=25)
-            response.raise_for_status()
-            values = response.json().get('valueRanges', [])
+            values = read_value_ranges(session, SHEET_ID, ranges, formatted=True)
             if len(values) != len(ranges):
                 raise RuntimeError('Unexpected history response')
             for i, week in enumerate(batch):

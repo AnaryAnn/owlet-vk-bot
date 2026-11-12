@@ -1,41 +1,32 @@
-"""One-off, read-only production probes. Never log cell contents or credentials."""
+"""Temporary production verification; logs statuses and counts only."""
+import base64
 import logging
+import os
 import time
-from urllib.parse import quote
+from sheets_api import SHEET_ID, _session
+from website_store import Sheets
 
-from sheets_api import SHEET_ID, _session, current_week
 
-
-def probe():
-    base = f'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}'
-    week = current_week()['sheetName']
-    checks = [
-        ('metadata', base, {'fields': 'sheets.properties'}),
-        ('participants_single', base + '/values/' + quote("'Участники'!A2:C3", safe=''), {}),
-        ('participants_batch', base + '/values:batchGet', {'ranges': "'Участники'!A2:C3"}),
-        ('participants_grid', base, {'ranges': "'Участники'!A2:C3", 'includeGridData': 'true',
-                                   'fields': 'sheets.data.rowData.values.userEnteredValue'}),
-        ('participants_effective', base, {'ranges': "'Участники'!A2:C3", 'includeGridData': 'true',
-                                   'fields': 'sheets.data.rowData.values(effectiveValue,formattedValue)'}),
-        ('week_grid', base, {'ranges': [f"'{week}'!B2", f"'{week}'!A8:D"], 'includeGridData': 'true',
-                                   'fields': 'sheets.data.rowData.values(userEnteredValue,effectiveValue,formattedValue)'}),
-        ('week_single', base + '/values/' + quote(f"'{week}'!A8:D9", safe=''), {}),
-    ]
-    with _session() as session:
-        for name, url, params in checks:
+def probe(app):
+    try:
+        with _session(write=True) as session:
+            api = Sheets(session)
+            metadata = api.get(SHEET_ID, fields='developerMetadata')
+            logging.warning('SHEETS_VERIFY shared_lock=%s', any(
+                m.get('metadataId') == 1937152401 for m in metadata.get('developerMetadata', [])))
+            # Empty atomic batch verifies the write endpoint without changing cells.
             started = time.monotonic()
-            try:
-                response = session.get(url, params=params, timeout=(5, 8))
-                response.raise_for_status()
-                data = response.json()
-                extra = {}
-                if name == 'metadata':
-                    props = [s['properties'] for s in data.get('sheets', [])]
-                    extra = {'tabs': len(props), 'cells': sum(
-                        p.get('gridProperties', {}).get('rowCount', 0) *
-                        p.get('gridProperties', {}).get('columnCount', 0) for p in props)}
-                logging.warning('SHEETS_PROBE name=%s status=%s seconds=%.2f details=%s',
-                                name, response.status_code, time.monotonic()-started, extra)
-            except Exception as exc:
-                logging.warning('SHEETS_PROBE name=%s error=%s seconds=%.2f',
-                                name, type(exc).__name__, time.monotonic()-started)
+            api.batch(SHEET_ID, [])
+            logging.warning('SHEETS_VERIFY empty_write=ok seconds=%.2f', time.monotonic()-started)
+    except Exception as exc:
+        logging.warning('SHEETS_VERIFY write_error=%s', type(exc).__name__)
+    password = os.environ.get('WEBSITE_SITE_PASSWORD') or os.environ.get('WEBSITE_ADMIN_PASSWORD', '')
+    headers = {'X-Website-Password': base64.b64encode(password.encode()).decode()}
+    with app.test_client() as client:
+        for path in ['/api/website/stats', '/api/website/history', '/api/website/participants']:
+            started = time.monotonic()
+            response = client.get(path, headers=headers)
+            data = response.get_json() or {}
+            logging.warning('SHEETS_VERIFY path=%s status=%s success=%s records=%s weeks=%s seconds=%.2f',
+                path, response.status_code, data.get('success'), len(data.get('currentRecords', [])),
+                len(data.get('weeks', [])), time.monotonic()-started)
