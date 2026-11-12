@@ -15,6 +15,10 @@ def probe():
         ('participants_batch', base + '/values:batchGet', {'ranges': "'Участники'!A2:C3"}),
         ('participants_grid', base, {'ranges': "'Участники'!A2:C3", 'includeGridData': 'true',
                                    'fields': 'sheets.data.rowData.values.userEnteredValue'}),
+        ('participants_effective', base, {'ranges': "'Участники'!A2:C3", 'includeGridData': 'true',
+                                   'fields': 'sheets.data.rowData.values(effectiveValue,formattedValue)'}),
+        ('week_grid', base, {'ranges': [f"'{week}'!B2", f"'{week}'!A8:D"], 'includeGridData': 'true',
+                                   'fields': 'sheets.data.rowData.values(userEnteredValue,effectiveValue,formattedValue)'}),
         ('week_single', base + '/values/' + quote(f"'{week}'!A8:D9", safe=''), {}),
     ]
     with _session() as session:
