@@ -70,6 +70,25 @@ class PublisherTests(unittest.TestCase):
         restarted.callback(event)
         self.assertEqual(len(self.posts()), 1)
 
+    def test_private_text_buttons_publish_only_the_matching_draft(self):
+        self.draft('Пост')
+        nonce = self.store.state['nonce']
+        key = pub.keyboard(nonce)['buttons'][0][0]['action']
+        self.assertEqual(key['type'], 'text')
+        self.message(3, key['label'])
+        self.message(4, key['label'])
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(self.posts()[0].args[1], 'Пост')
+        self.assertEqual(self.store.state['phase'], 'closed')
+
+    def test_old_private_button_does_not_publish_a_newer_draft(self):
+        self.draft('Первый')
+        label = pub.keyboard(self.store.state['nonce'])['buttons'][0][0]['action']['label']
+        self.message(3, 'Второй')
+        self.message(4, label)
+        self.assertFalse(self.posts())
+        self.assertEqual(self.store.state['text'], 'Второй')
+
     def test_photo_only_and_multiple_photos(self):
         photos = [{'type': 'photo', 'photo': {'owner_id': -17, 'id': n}} for n in (1, 2)]
         event = self.draft('', photos)
@@ -147,6 +166,22 @@ class PublisherTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_approved_recovery_checks_original_content_and_uses_existing_identity(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 11, 12, 19, 6, tzinfo=timezone.utc).timestamp()
+        store, send = Drafts(), Mock(return_value={'response': 555})
+        store.state = dict(phase='preview', last_cid=20, nonce='a'*32, text='Одобрено',
+                           attachment='', expires=now+300)
+        actual = dict(id=20, from_id=54341305, peer_id=54341305, text='Одобрено')
+        with patch.object(pub, 'GoogleDraftStore', return_value=store), \
+             patch.object(pub, 'verified_message', return_value=actual), patch.object(pub.time, 'time', return_value=now):
+            pub.recover_confirmed_publication(54341305, send, 'token')
+            pub.recover_confirmed_publication(54341305, send, 'token')
+        posts = [c for c in send.call_args_list if c.args[0] == pub.TARGET]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].kwargs['random_id'], 'admin-publish:' + 'a'*32)
+        self.assertEqual(store.state['phase'], 'closed')
+
     def test_verified_global_order_does_not_mix_with_conversation_order(self):
         response = Mock()
         drafts, send = Drafts(), Mock()

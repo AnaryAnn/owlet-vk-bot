@@ -104,7 +104,7 @@ def keyboard(nonce, retry=False):
     actions = [('send', 'Проверить отправку' if retry else 'Отправить', 'positive')]
     if not retry:
         actions.append(('cancel', 'Отмена', 'negative'))
-    return {'inline': True, 'buttons': [[{'action': {'type': 'callback', 'label': label,
+    return {'inline': True, 'buttons': [[{'action': {'type': 'text', 'label': label + ' ' + nonce[:8].upper(),
         'payload': json.dumps({'kind': 'admin_publish', 'nonce': nonce, 'action': action})}, 'color': color}
         for action, label, color in actions]]}
 
@@ -147,6 +147,18 @@ class Publisher:
         cid = int(message.get('conversation_message_id') or 0)
         if cid <= 0:
             return False
+        command = re.fullmatch(r'(отправить|проверить отправку|отмена) ([a-f0-9]{8})',
+                               normalized(message.get('text', '')))
+        if command:
+            with self.store.locked() as tx:
+                nonce = tx.state.get('nonce', '')
+                if not nonce or command[2] != nonce[:8]:
+                    self.reply('Это кнопка другого черновика. Используй кнопки под последним предпросмотром.',
+                               f'stale-button:{cid}')
+                    return True
+            return self.callback({'user_id': self.owner, 'peer_id': self.owner,
+                'payload': {'kind': 'admin_publish', 'nonce': nonce,
+                            'action': 'cancel' if command[1] == 'отмена' else 'send'}})
         with self.store.locked() as tx:
             state = dict(tx.state)
             logging.warning('ADMIN_PUBLISH_MESSAGE order=%s previous=%s phase=%s',
@@ -195,6 +207,7 @@ class Publisher:
             self.reply(body, f'preview:{state["nonce"]}', attachment=photos or None)
             self.reply('Так будет выглядеть сообщение в «Сычиной охоте». Отправить от лица Робосычика?',
                        f'controls:{state["nonce"]}', keyboard=keyboard(state['nonce']))
+            logging.warning('ADMIN_PUBLISH_PREVIEW sent order=%s photos=%s', cid, bool(photos))
         return True
 
     def callback(self, event):
@@ -214,6 +227,7 @@ class Publisher:
             if not nonce or nonce != state.get('nonce') or action not in ('send', 'cancel'):
                 return True
             phase = state.get('phase')
+            logging.warning('ADMIN_PUBLISH_CONFIRM action=%s phase=%s', action, phase)
             if phase == 'closed':
                 self.reply('Эта депеша уже отправлена или отменена. Режим закрыт.', 'closed:' + nonce)
                 return True
@@ -234,8 +248,8 @@ class Publisher:
             state['phase'] = 'sending'
             tx.save(state)
             try:
-                self.send(TARGET, state['text'], attachment=state['attachment'] or None,
-                          random_id='admin-publish:' + nonce)
+                delivery = self.send(TARGET, state['text'], attachment=state['attachment'] or None,
+                                     random_id='admin-publish:' + nonce)
             except Exception as exc:
                 if isinstance(exc, RuntimeError) and str(exc).startswith('VK messages.send error:'):
                     state['phase'] = 'preview'
@@ -248,11 +262,12 @@ class Publisher:
                            'retry:' + nonce, keyboard=keyboard(nonce, retry=True))
                 return True
             tx.save({'phase': 'closed', 'nonce': nonce, 'last_cid': state.get('last_cid', 0)})
+            logging.warning('ADMIN_PUBLISH_SENT response=%s', delivery.get('response') if isinstance(delivery, dict) else bool(delivery))
             self.reply('🦉 Депеша отправлена в «Сычиную охоту». Режим закрыт.', 'sent:' + nonce)
         return True
 
 
-def verified_message(message, token, owner):
+def verified_message(message, token, owner, max_age=TTL):
     """The public callback body cannot authorize publishing by claiming a VK ID.
 
     Fetch incoming DM content independently from VK. The durable high-water CID
@@ -281,7 +296,7 @@ def verified_message(message, token, owner):
     matches = [m for m in items if (int(m.get('id') or 0) == mid if mid > 0 else
                                   int(m.get('conversation_message_id') or 0) == cid)
                and int(m.get('from_id') or 0) == owner and int(m.get('peer_id') or 0) == owner
-               and not m.get('out') and time.time() - int(m.get('date') or 0) <= TTL]
+               and not m.get('out') and (max_age is None or time.time() - int(m.get('date') or 0) <= max_age)]
     if len(matches) != 1:
         logging.warning('ADMIN_PUBLISH verification rejected method=%s items=%s', method, len(items))
         return None
@@ -343,11 +358,40 @@ def prepare(send=None, token=None):
                 raise ValueError('Invalid draft store')
             if not tx.exists or tx.migrated:
                 tx.save(tx.state)
-        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=3', owner)
+        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=4', owner)
         if send and token:
+            recover_confirmed_publication(owner, send, token)
             recover_command(owner, send, token)
     except Exception:
         logging.exception('ADMIN_PUBLISH initialization failed')
+
+
+def recover_confirmed_publication(owner, send, token):
+    """One-off recovery of message 20, explicitly confirmed by its owner.
+
+    The owner's reported click is recorded at 2026-11-12 19:04:30 UTC. Verify the
+    exact original VK content, preserve the send identity, and skip any edited,
+    cancelled or already closed draft. No other message can be published here.
+    """
+    from datetime import datetime, timezone
+    approved_at = datetime(2026, 11, 12, 19, 4, 30, tzinfo=timezone.utc).timestamp()
+    if owner != 54341305 or time.time() > approved_at + 3600:
+        return
+    store = GoogleDraftStore(owner)
+    with store.locked() as tx:
+        state = dict(tx.state)
+        if state.get('last_cid') != 20 or state.get('phase') not in ('preview', 'sending'):
+            logging.warning('ADMIN_PUBLISH_APPROVED_RECOVERY skipped phase=%s', state.get('phase'))
+            return
+        actual = verified_message({'id': 20, 'peer_id': owner}, token, owner, max_age=None)
+        if (not actual or content(actual) != (state.get('text'), state.get('attachment'))
+                or approved_at > state.get('expires', 0)):
+            logging.warning('ADMIN_PUBLISH_APPROVED_RECOVERY snapshot mismatch')
+            return
+        nonce = state['nonce']
+    Publisher(owner, store, send, now=lambda: approved_at).callback({
+        'user_id': owner, 'peer_id': owner,
+        'payload': {'kind': 'admin_publish', 'nonce': nonce, 'action': 'send'}})
 
 
 def recover_command(owner, send, token):
