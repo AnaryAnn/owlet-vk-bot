@@ -29,9 +29,9 @@ def table(api, book, name):
 
 def quest_action(api, book, action, data):
     """Вызывается под одной блокировкой книги; переход и исходящие — один batch."""
-    if action.startswith("poll"):
-        from quest_polls import storage
-        return storage(api, book, action, data)
+    if action == "vote":
+        from quest_votes import vote
+        return vote(api, book, data)
     tabs = api.tabs(book)
     writes = []
     timestamp = now_iso()
@@ -122,9 +122,11 @@ def quest_action(api, book, action, data):
         if not stage:
             raise ValueError('Этап квеста отсутствует')
         if stage.get('тип') == 'vote':
-            from quest_votes import options, announcement, deadline as vote_deadline, summarize
+            from quest_votes import options, announcement, deadline as vote_deadline, tally
             choices = options(stage, stages)
             if quest['статус'] == 'active':
+                if f"{quest['quest_id']}:{stage['stage_id']}:vote_result" in emitted:
+                    raise ValueError('Этот этап голосования уже завершён. Используйте новый quest_id или stage_id')
                 if datetime.now(timezone.utc) >= vote_deadline(stage):
                     raise ValueError('Нельзя открыть голосование с прошедшим дедлайном')
                 transitions.append({'quest': quest['quest_id'], 'kind': 'vote_open'})
@@ -134,12 +136,12 @@ def quest_action(api, book, action, data):
                 continue
             if datetime.now(timezone.utc) < vote_deadline(stage):
                 continue
-            from quest_polls import state
-            poll = state(api, book, quest, stage, choices)
-            if not poll or poll['status'] != 'published' or str(poll.get('closed')) != '1':
-                continue  # Нет подтверждённых итогов VK — ветку не выбираем.
-            import json
-            target_id, summary = summarize(stage, choices, json.loads(poll['votes_JSON']))
+            announced = any(r.get('quest_id') == quest['quest_id'] and r.get('stage_id') == stage['stage_id']
+                            and not r.get('event_id', '').endswith(':vote_result')
+                            and r.get('статус') == 'sent' for r in outbox)
+            if not announced:
+                raise RuntimeError('Голосование не было подтверждено как отправленное до дедлайна; ветка не выбрана')
+            target_id, summary = tally(api, book, quest, stage, choices)
             target = next(s for s in stages if s['quest_id'] == quest['quest_id'] and s['stage_id'] == target_id)
             transitions.append({'quest': quest['quest_id'], 'kind': 'vote_result', 'to': target_id})
             if not dry:
@@ -180,6 +182,8 @@ def quest_action(api, book, action, data):
             if target.get('тип') == 'vote':
                 from quest_votes import options, announcement, deadline as vote_deadline
                 choices = options(target, stages)
+                if f"{quest['quest_id']}:{target_id}:vote_result" in emitted:
+                    raise ValueError('Нельзя повторно открыть завершённое голосование; используйте новый stage_id')
                 if datetime.now(timezone.utc) >= vote_deadline(target):
                     raise ValueError('Дедлайн следующего голосования уже прошёл')
                 text = announcement(quest, target, choices)
@@ -196,7 +200,9 @@ def quest_action(api, book, action, data):
         source = next((s for s in stages if s['quest_id'] == row.get('quest_id')
                        and s['stage_id'] == row.get('stage_id')), None)
         if source and source.get('тип') == 'vote' and not row['event_id'].endswith(':vote_result'):
-            item['poll'] = dict(questId=source['quest_id'], stageId=source['stage_id'])
+            from quest_votes import options, keyboard
+            owner = next(q for q in quests if q['quest_id'] == source['quest_id'])
+            item['keyboard'] = keyboard(owner, source, options(source, stages))
         outgoing.append(item)
     return {'success': True, 'transitions': transitions, 'outbox': outgoing}
 

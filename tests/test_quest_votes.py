@@ -1,16 +1,14 @@
 import copy
 import json
-import os
 import unittest
 from datetime import datetime, timezone
+import native_quests
+import quest_votes
 from unittest.mock import patch
 
 import app
-import native_quests
-import quest_polls
 from native_quests import quest_action
-from quest_polls import HEADERS, fingerprint, publish, refresh, recover, VKRejected
-from quest_votes import options, summarize
+from quest_votes import HEADERS, version, options, keyboard, parse_payload
 from test_native_features import QuestSheets
 
 
@@ -23,211 +21,186 @@ class Future(datetime):
 class VotingSheets(QuestSheets):
     def __init__(self):
         super().__init__()
-        self.sheets['_QuestPolls'] = [HEADERS]
+        self.sheets['Голоса'] = [HEADERS]
         self.sheets['Этапы'][0] += ['варианты_JSON', 'ничья_этап']
         stage = self.sheets['Этапы'][1]
         stage[2] = 'vote'
         stage += [json.dumps([{'текст': 'Лес', 'этап': 'ok'}, {'текст': 'Горы', 'этап': 'fail'}]), '']
     def ensure_tab(self, book, name, headers):
-        self.sheets.setdefault(name, [headers])
         return self.tabs(book)[name]['sheetId']
 
 
-class PollStateTests(unittest.TestCase):
+class VotingTests(unittest.TestCase):
     def setUp(self):
         self.api = VotingSheets()
-    def call(self, action, **kwargs):
-        return quest_action(self.api, 'b', action, kwargs)
     def tick(self, **extra):
-        return self.call('tick', fact=0, **extra)
-    def claim(self):
-        return self.call('pollClaim', questId='q', stageId='start', eventId='q:start:vote_open')
-    def bind(self):
-        return self.call('pollBind', questId='q', stageId='start', ownerId=12, pollId=99, answerIds=[41, 42])
-    def published(self):
-        return self.call('pollPublished', questId='q', stageId='start', messageId=7)
-    def prepare(self):
-        self.tick(); self.claim(); self.bind(); self.published()
-    def result(self, counts):
-        with patch.object(native_quests, 'datetime', Future), patch.object(quest_polls, 'datetime', Future):
-            self.call('pollSnapshot', questId='q', stageId='start', counts=counts, closed=True)
+        result = quest_action(self.api, 'b', 'tick', dict(fact=0, **extra))
+        if not extra.get('dryRun'):
+            for item in result['outbox']:
+                if item.get('keyboard'):
+                    quest_action(self.api, 'b', 'ack', {'eventId': item['eventId']})
+        return result
+    def cast(self, **extra):
+        payload = dict(questId='q', peerId='2000000002', vkId='123', choice=1, messageId=10)
+        _, quests = native_quests.table(self.api, 'b', 'Квесты')
+        _, stages = native_quests.table(self.api, 'b', 'Этапы')
+        stage = stages[0]
+        payload.update(stageId=stage['stage_id'], revision=version(quests[0], stage, options(stage, stages)))
+        payload.update(extra)
+        return quest_action(self.api, 'b', 'vote', payload)
+    def close(self):
+        with patch.object(native_quests, 'datetime', Future), patch.object(quest_votes, 'datetime', Future):
             return self.tick()
-    def test_open_native_poll_not_chat_commands(self):
+    def test_open_contains_choices_command_and_deadline(self):
         result = self.tick()
-        self.assertEqual(result['outbox'][0]['poll'], {'questId': 'q', 'stageId': 'start'})
-        self.assertIn('прикреплённом опросе', result['outbox'][0]['text'])
-        self.assertNotIn('голос q', result['outbox'][0]['text'])
-    def test_uncertain_creation_not_repeated(self):
-        self.tick(); self.assertTrue(self.claim()['create'])
-        with self.assertRaisesRegex(RuntimeError, 'не подтверждено'): self.claim()
-        self.assertEqual(len(self.api.sheets['_QuestPolls']), 2)
-    def test_explicit_api_rejection_allows_retry(self):
-        self.tick(); self.claim()
-        self.call('pollCreateFailed', questId='q', stageId='start')
-        self.assertTrue(self.claim()['create'])
-    def test_bound_poll_reused(self):
-        self.tick(); self.claim(); self.bind()
-        self.assertEqual(self.claim()['poll'], {'ownerId': 12, 'pollId': 99})
-    def test_no_vk_snapshot_no_branch_selected(self):
-        self.prepare()
-        with patch.object(native_quests, 'datetime', Future):
-            self.assertEqual(self.tick()['transitions'], [])
+        text = result['outbox'][0]['text']
+        self.assertIn('Нажми кнопку', text)
+        self.assertEqual(result['outbox'][0]['keyboard']['buttons'][0][0]['action']['type'], 'text')
+        self.assertIn('МСК', text)
         self.assertEqual(self.api.sheets['Квесты'][1][2], 'running')
-    def test_winner_and_no_duplicate_transition(self):
-        self.prepare()
-        result = self.result([1, 5])
-        self.assertEqual(result['transitions'][0]['to'], 'fail')
-        self.assertIn('Горы: 5', result['outbox'][-1]['text'])
-        self.assertNotIn('poll', result['outbox'][-1])
         self.assertEqual(self.tick()['transitions'], [])
-    def test_empty_and_tie_rules(self):
-        stage = {'провал_этап': 'empty', 'ничья_этап': 'tie'}
-        choices = [{'текст': 'Лес', 'этап': 'forest'}, {'текст': 'Горы', 'этап': 'mountains'}]
-        self.assertEqual(summarize(stage, choices, [0, 0])[0], 'empty')
-        self.assertEqual(summarize(stage, choices, [4, 4])[0], 'tie')
-        stage['ничья_этап'] = ''
-        self.assertEqual(summarize(stage, choices, [4, 4])[0], 'forest')
-    def test_snapshot_rejects_early_unclosed_or_negative_results(self):
-        self.prepare()
-        with self.assertRaises(ValueError):
-            self.call('pollSnapshot', questId='q', stageId='start', counts=[1, 2], closed=True)
-        with patch.object(quest_polls, 'datetime', Future):
-            for data in ({'counts': [1, 2], 'closed': False}, {'counts': [-1, 2], 'closed': True}):
-                with self.assertRaises(ValueError):
-                    self.call('pollSnapshot', questId='q', stageId='start', **data)
-    def test_changed_configuration_does_not_reuse_poll(self):
-        self.prepare()
-        self.api.sheets['Этапы'][1][3] = 'Другой вопрос'
-        with self.assertRaisesRegex(ValueError, 'изменены'): self.claim()
-    def test_dry_run_does_not_create_poll_state(self):
+    def test_last_vote_wins_and_stale_callback_cannot_revert(self):
+        self.tick()
+        self.cast()
+        self.cast(choice=2, messageId=12)
+        self.assertTrue(self.cast(choice=1, messageId=10)['duplicate'])
+        self.assertEqual(len(self.api.sheets['Голоса']), 2)
+        result = self.close()
+        self.assertEqual(result['transitions'][0]['to'], 'fail')
+        self.assertIn('Горы: 1', result['outbox'][-1]['text'])
+        self.assertEqual(self.tick()['transitions'], [])
+    def test_wrong_peer_inactive_and_invalid_choice_rejected(self):
+        with self.assertRaises(ValueError): self.cast()
+        self.tick()
+        for data in ({'peerId': '2000000009'}, {'choice': 8}, {'vkId': '-1'}):
+            with self.assertRaises(ValueError): self.cast(**data)
+        self.assertEqual(len(self.api.sheets['Голоса']), 1)
+    def test_late_vote_rejected_and_empty_uses_fallback(self):
+        self.tick()
+        self.close()
+        with self.assertRaises(ValueError): self.cast()
+        self.assertEqual(self.api.sheets['Квесты'][1][3], 'fail')
+    def test_old_stage_and_changed_revision_buttons_are_rejected(self):
+        self.tick()
+        for data in ({'stageId': 'old'}, {'revision': '0'*16}):
+            with self.assertRaisesRegex(ValueError, 'устарела'):
+                self.cast(**data)
+        self.assertEqual(len(self.api.sheets['Голоса']), 1)
+    def test_expired_button_rejected_even_before_results_tick(self):
+        self.tick()
+        with patch.object(quest_votes, 'datetime', Future):
+            with self.assertRaisesRegex(ValueError, 'завершён'):
+                self.cast()
+        self.assertEqual(len(self.api.sheets['Голоса']), 1)
+    def test_changing_question_after_votes_stops_result(self):
+        self.tick(); self.cast()
+        self.api.sheets['Этапы'][1][3] = 'Изменённый вопрос'
+        with self.assertRaisesRegex(ValueError, 'изменены'):
+            self.close()
+    def test_undelivered_vote_does_not_choose_empty_fallback(self):
+        quest_action(self.api, 'b', 'tick', {'fact': 0})
+        with patch.object(native_quests, 'datetime', Future), patch.object(quest_votes, 'datetime', Future):
+            with self.assertRaisesRegex(RuntimeError, 'не было подтверждено'):
+                quest_action(self.api, 'b', 'tick', {'fact': 0})
+        self.assertEqual(self.api.sheets['Квесты'][1][2], 'running')
+    def test_finished_vote_cannot_be_reopened(self):
+        self.tick(); self.cast(); self.close()
+        self.api.sheets['Квесты'][1][2:4] = ['active', 'start']
+        with self.assertRaisesRegex(ValueError, 'уже завершён'):
+            self.tick()
+    def test_tie_first_and_explicit_tie_branch(self):
+        for tie, expected in [('', 'ok'), ('fail', 'fail')]:
+            self.api = VotingSheets()
+            self.api.sheets['Этапы'][1][-1] = tie
+            self.tick(); self.cast(); self.cast(vkId='456', choice=2)
+            self.assertEqual(self.close()['transitions'][0]['to'], expected)
+    def test_vote_result_can_continue_nonterminal_stage(self):
+        self.api.sheets['Этапы'][2][2] = 'task'
+        self.tick(); self.cast(); self.close()
+        self.assertEqual(self.api.sheets['Квесты'][1][2:4], ['running', 'ok'])
+    def test_dry_run_leaves_sheets_untouched(self):
         before = copy.deepcopy(self.api.sheets)
         self.tick(dryRun=True)
         self.assertEqual(self.api.sheets, before)
-    def test_nonterminal_branch_stays_running(self):
-        self.api.sheets['Этапы'][2][2] = 'task'
-        self.prepare(); self.result([5, 1])
-        self.assertEqual(self.api.sheets['Квесты'][1][2:4], ['running', 'ok'])
-    def test_threshold_opens_vote_instead_of_finishing(self):
-        self.api.sheets['Этапы'][1][1] = 'voting'
+    def test_bad_options_rejected_before_any_writes(self):
+        self.api.sheets['Этапы'][1][-2] = '[{"текст":"Лес","этап":"missing"}]'
+        with self.assertRaises(ValueError): self.tick()
+        self.assertEqual(self.api.writes, [])
+    def test_threshold_stage_opens_vote_and_stays_running(self):
+        stage = self.api.sheets['Этапы'][1]
+        stage[1] = 'voting'
         self.api.sheets['Этапы'].append(['q', 'start', 'start', 'Начало', '0', '',
             '2099-01-01T00:00:00Z', 'voting', 'fail', '', ''])
-        self.tick(); result = self.tick()
+        self.tick()
+        result = self.tick()
         self.assertEqual(self.api.sheets['Квесты'][1][2:4], ['running', 'voting'])
-        self.assertEqual(result['outbox'][-1]['poll']['stageId'], 'voting')
+        self.assertIn('keyboard', result['outbox'][-1])
 
 
-class PollTransportTests(unittest.TestCase):
-    def setUp(self):
-        self.env = patch.dict(os.environ, {'VK_POLL_USER_TOKEN': 'private-user-token', 'VK_TOKEN': 'group-token'})
-        self.env.start(); self.addCleanup(self.env.stop)
-        self.item = dict(eventId='q:start:vote_open', peerId='2000000002', text='Выбираем путь',
-                         poll=dict(questId='q', stageId='start'))
-        self.config = dict(success=True, create=True, question='Куда?', answers=['Лес', 'Горы'], endDate=100000)
-        self.poll = dict(id=99, owner_id=12, question='Куда?', multiple=False, end_date=100000,
-                         closed=True, answers=[dict(id=41, text='Лес', votes=3), dict(id=42, text='Горы', votes=2)])
-        self.message = {'items': [dict(id=7, peer_id=2000000002,
-            attachments=[dict(type='poll', poll=dict(id=99, owner_id=12))])]}
-    def api(self, action, **kwargs):
-        self.calls.append((action, kwargs))
-        return self.config if action == 'pollClaim' else {'success': True}
-    def test_create_send_verify_and_mark_published(self):
-        self.calls = []
-        with patch.object(quest_polls, 'vk_call', side_effect=[self.poll, 7, self.message]) as vk:
-            publish(self.item, self.api)
-        self.assertEqual([c[0] for c in self.calls], ['pollClaim', 'pollBind', 'pollPublished'])
-        self.assertEqual(vk.call_args_list[0].args[:2], ('polls.create', 'private-user-token'))
-        self.assertEqual(vk.call_args_list[1].args[:2], ('messages.send', 'group-token'))
-        self.assertEqual(vk.call_args_list[1].kwargs['attachment'], 'poll12_99')
-    def test_retry_reuses_poll_and_same_message_random_id(self):
-        self.config = dict(poll=dict(ownerId=12, pollId=99))
-        self.calls = []
-        with patch.object(quest_polls, 'vk_call', side_effect=[7, self.message, 7, self.message]) as vk:
-            publish(self.item, self.api); publish(self.item, self.api)
-        self.assertEqual(vk.call_args_list[0].kwargs['random_id'], vk.call_args_list[2].kwargs['random_id'])
-        self.assertFalse(any(c[0] == 'pollBind' for c in self.calls))
-    def test_missing_attachment_never_marks_published(self):
-        self.calls = []
-        with patch.object(quest_polls, 'vk_call', side_effect=[self.poll, 7, {'items': []}]):
-            with self.assertRaisesRegex(RuntimeError, 'вложение'): publish(self.item, self.api)
-        self.assertNotIn('pollPublished', [c[0] for c in self.calls])
-    def test_missing_token_does_not_claim(self):
-        self.calls = []
-        with patch.dict(os.environ, {'VK_POLL_USER_TOKEN': ''}):
-            with self.assertRaises(RuntimeError): publish(self.item, self.api)
-        self.assertEqual(self.calls, [])
-    def test_timeout_does_not_release_creation_but_explicit_rejection_does(self):
-        for error, released in [(RuntimeError('timeout'), False), (VKRejected('access denied'), True)]:
-            self.calls = []
-            with patch.object(quest_polls, 'vk_call', side_effect=error):
-                with self.assertRaises(RuntimeError): publish(self.item, self.api)
-            self.assertEqual('pollCreateFailed' in [c[0] for c in self.calls], released)
-    def test_results_map_by_answer_id_not_api_order(self):
-        calls = []
-        def api(action, **kw):
-            calls.append((action, kw))
-            return dict(tasks=[dict(questId='q', stageId='start', ownerId=12, pollId=99,
-                answerIds=[41, 42], endDate=100000, question='Куда?', answerTexts=['Лес', 'Горы'])])
-        self.poll['answers'].reverse()
-        with patch.object(quest_polls, 'vk_call', return_value=self.poll): refresh(2000000002, api)
-        self.assertEqual(calls[-1][1]['counts'], [3, 2])
-    def test_changed_or_unclosed_poll_never_applies_result(self):
-        for field, value in [('closed', False), ('end_date', 999), ('multiple', True), ('question', 'Другое?')]:
-            poll = dict(self.poll, **{field: value})
-            calls = []
-            def api(action, **kw):
-                calls.append(action)
-                return dict(tasks=[dict(questId='q', stageId='start', ownerId=12, pollId=99,
-                    answerIds=[41, 42], endDate=100000, question='Куда?', answerTexts=['Лес', 'Горы'])])
-            with patch.object(quest_polls, 'vk_call', return_value=poll):
-                with self.assertRaises((RuntimeError, ValueError)): refresh(2000000002, api)
-            self.assertEqual(calls, ['pollTasks'])
-    def test_api_errors_do_not_expose_token(self):
-        import requests
-        with patch.object(quest_polls.requests, 'post', side_effect=requests.Timeout('private-user-token')):
-            with self.assertRaises(RuntimeError) as error: quest_polls.vk_call('polls.create', 'private-user-token')
-        self.assertNotIn('private-user-token', str(error.exception))
-    def test_recovery_route_requires_secret(self):
-        with patch.object(app, 'SCHEDULE_SECRET', 'test'):
-            self.assertEqual(app.app.test_client().post('/quest-poll-recover', json={}).status_code, 403)
+class VotingCallbackTests(unittest.TestCase):
+    def test_vk_button_uses_identity_and_order_from_vk_event(self):
+        selected = dict(kind='quest_vote', questId='q', stageId='s', revision='a'*16, choice=2,
+                        vkId='999', peerId='2000000099')
+        with app.app.app_context(), patch.object(app, 'VK_GROUP_ID', '17'), \
+             patch('quest_engine.quest_api', return_value={'choice': 2, 'success': True}) as save, \
+             patch.object(app, 'vk_send') as send:
+            app.process_vk_event(dict(type='message_new', group_id=17, event_id='evt', object=dict(message=dict(
+                from_id=123, peer_id=2000000002, text='2. Горы', payload=json.dumps(selected), conversation_message_id=99))))
+        self.assertEqual(save.call_args.kwargs['messageId'], 99)
+        self.assertEqual(save.call_args.kwargs['vkId'], '123')
+        self.assertEqual(save.call_args.kwargs['peerId'], '2000000002')
+        send.assert_called_once()
+    def test_quest_job_without_book_skips_clearly(self):
+        with patch.object(app, 'SCHEDULE_SECRET', 'test'), patch.dict('os.environ', {'QUEST_SPREADSHEET_ID': ''}):
+            response = app.app.test_client().post('/native-schedule', json={'jobs': ['quests']},
+                headers={'X-Schedule-Secret': 'test'})
+        self.assertTrue(response.json['success'])
+        self.assertTrue(response.json['jobs'][0]['skipped'])
 
-    def test_recovery_verifies_existing_poll_before_binding(self):
-        calls = []
-        def api(action, **kw):
-            calls.append((action, kw))
-            return self.config if action == 'pollConfig' else {'success': True}
-        with patch.object(quest_polls, 'vk_call', return_value=self.poll):
-            recover(dict(questId='q', stageId='start', ownerId=12, pollId=99), api)
-        self.assertEqual([a for a, _ in calls], ['pollConfig', 'pollBind'])
-        self.assertEqual(calls[-1][1]['answerIds'], [41, 42])
-    def test_recovery_wrong_question_never_binds(self):
-        calls = []
-        def api(action, **kw):
-            calls.append(action)
-            return self.config
-        poll = dict(self.poll, question='Подмена?')
-        with patch.object(quest_polls, 'vk_call', return_value=poll):
+
+class KeyboardTests(unittest.TestCase):
+    def test_keyboard_payload_and_label_fit_limits(self):
+        api = VotingSheets()
+        _, quests = native_quests.table(api, 'b', 'Квесты')
+        _, stages = native_quests.table(api, 'b', 'Этапы')
+        choices = options(stages[0], stages)
+        choices[0]['текст'] = 'Очень длинный вариант ' * 4
+        result = keyboard(quests[0], stages[0], choices)
+        self.assertTrue(result['inline'])
+        self.assertFalse(result['one_time'])
+        for row in result['buttons']:
+            action = row[0]['action']
+            self.assertLessEqual(len(action['label']), 40)
+            self.assertLessEqual(len(action['payload'].encode()), 255)
+            self.assertEqual(parse_payload(action['payload'])['stageId'], 'start')
+    def test_unrelated_payload_ignored_invalid_vote_rejected(self):
+        for payload in ('not json', '[]', '{"kind":"other"}', None):
+            self.assertIsNone(parse_payload(payload))
+        for value in (True, -1, 7, '1'):
             with self.assertRaises(ValueError):
-                recover(dict(questId='q', stageId='start', ownerId=12, pollId=99), api)
-        self.assertEqual(calls, ['pollConfig'])
-
-
-class PollEngineTests(unittest.TestCase):
-    def test_failed_poll_delivery_is_not_acknowledged(self):
+                parse_payload(dict(kind='quest_vote', questId='q', stageId='s', choice=value, revision='a'*16))
+    def test_vk_send_keyboard_only_on_first_chunk_and_stable_random_id(self):
+        response = type('Response', (), {'raise_for_status': lambda _: None,
+                                        'json': lambda _: {'response': 7}})()
+        with patch.object(app, 'split_vk_message', return_value=['one', 'two']), \
+             patch.object(app.requests, 'post', return_value=response) as post:
+            app.vk_send(2000000002, 'text', keyboard={'inline': True, 'buttons': []}, random_id='quest:event')
+            ids = [c.kwargs['data']['random_id'] for c in post.call_args_list]
+            self.assertIn('keyboard', post.call_args_list[0].kwargs['data'])
+            self.assertNotIn('keyboard', post.call_args_list[1].kwargs['data'])
+            post.reset_mock()
+            app.vk_send(2000000002, 'text', random_id='quest:event')
+            self.assertEqual(ids, [c.kwargs['data']['random_id'] for c in post.call_args_list])
+            self.assertNotEqual(ids[0], ids[1])
+    def test_failed_keyboard_delivery_not_acknowledged(self):
         import quest_engine
-        item = dict(eventId='q:s:vote_open', peerId='2000000002', text='Вопрос',
-                    poll=dict(questId='q', stageId='s'))
         calls = []
-        def api(action, **kw):
+        item = dict(eventId='q:s:vote_open', peerId='2000000002', text='Выбираем', keyboard={'buttons': []})
+        def api(action, **kwargs):
             calls.append(action)
-            return {'tasks': []} if action == 'pollTasks' else {'outbox': [item]}
-        with patch.object(quest_engine, 'quest_api', side_effect=api), \
-             patch.object(quest_polls, 'publish', side_effect=RuntimeError('Не доставлен')):
+            return {'outbox': [item]}
+        with patch.object(quest_engine, 'quest_api', side_effect=api):
             with self.assertRaises(RuntimeError):
-                quest_engine.tick(lambda _: {'success': True}, lambda *_: None, 2000000002)
+                quest_engine.tick(lambda _: {'success': True},
+                    lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('offline')), 2000000002)
         self.assertNotIn('ack', calls)
-    def test_dry_run_does_not_contact_vk(self):
-        import quest_engine
-        with patch.object(quest_engine, 'quest_api', return_value={'transitions': []}), \
-             patch.object(quest_polls, 'vk_call') as vk:
-            quest_engine.tick(lambda _: {'success': True}, lambda *_: None, 2000000002, dry_run=True)
-        vk.assert_not_called()

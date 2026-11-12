@@ -22,9 +22,6 @@ def tick(stats_loader, vk_sender, peer_id, dry_run=False):
     total_fact = sum(float(r.get('fact') or 0) for r in records)
     goal = stats.get('teamGoal')
     percent = 100 * total_fact / float(goal) if goal not in (None, '', 0, '0') else None
-    if not dry_run:
-        from quest_polls import refresh
-        refresh(peer_id, quest_api)
     payload = quest_api('tick', fact=total_fact, percent=percent, dryRun=bool(dry_run))
     if dry_run:
         return payload
@@ -32,9 +29,8 @@ def tick(stats_loader, vk_sender, peer_id, dry_run=False):
     for item in payload.get('outbox', []):
         if item.get('peerId') and str(item['peerId']) != str(peer_id):
             continue
-        if item.get('poll'):
-            from quest_polls import publish
-            publish(item, quest_api)
+        if item.get('keyboard'):
+            vk_sender(peer_id, item['text'], keyboard=item['keyboard'], random_id='quest:' + item['eventId'])
         else:
             vk_sender(peer_id, item['text'])
         quest_api('ack', eventId=item['eventId'])
