@@ -1,5 +1,0 @@
-[
-  {"job": "sync", "everyMinutes": 240},
-  {"job": "statistics", "weekdays": [4, 5, 6, 0], "hour": 18, "minute": 0},
-  {"job": "evening", "hour": 18, "minute": 0}
-]

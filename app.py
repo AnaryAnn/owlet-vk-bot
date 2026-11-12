@@ -1114,7 +1114,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 2,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 3,
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
@@ -1440,7 +1440,7 @@ def process_vk_event(data):
         text = (msg.get("text") or "").strip()
         event_id = data.get("event_id")
 
-        if user_id and peer_id and 0 < int(peer_id) < 2000000000:
+        if peer_id and 0 < int(peer_id) < 2000000000:
             from admin_publish import handle_message
             handle_message(msg, vk_send, VK_TOKEN)
             return Response('ok')

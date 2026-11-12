@@ -74,12 +74,20 @@ class GoogleDraftStore:
                     raise ValueError('Повторные состояния организатора')
                 index, row = found[0] if found else (None, [])
                 state = json.loads(row[1]) if len(row) > 1 else {'phase': 'closed', 'last_cid': 0}
+                migrated = state.get('ordering_version') != 2
+                if migrated:
+                    logging.warning('ADMIN_PUBLISH order migration previous=%s phase=%s',
+                                    state.get('last_cid'), state.get('phase'))
+                    state['last_cid'] = 0
+                    state['ordering_version'] = 2
                 class Transaction:
                     def __init__(self):
                         self.state = state
                         self.exists = bool(found)
+                        self.migrated = migrated
                     def save(tx, value):
                         nonlocal index
+                        value = dict(value, ordering_version=2)
                         record = [str(self.owner), json.dumps(value, ensure_ascii=False)]
                         api.batch(book, [update(sid, index, 0, record) if index is not None else append(sid, record)])
                         if index is None:
@@ -141,6 +149,8 @@ class Publisher:
             return False
         with self.store.locked() as tx:
             state = dict(tx.state)
+            logging.warning('ADMIN_PUBLISH_MESSAGE order=%s previous=%s phase=%s',
+                            cid, state.get('last_cid', 0), state.get('phase'))
             if cid <= state.get('last_cid', 0):
                 return True
             phase = state.get('phase', 'closed')
@@ -247,7 +257,7 @@ def verified_message(message, token, owner):
     Fetch incoming DM content independently from VK. The durable high-water CID
     rejects replays. Confirmation buttons carry a fresh private 128-bit nonce.
     """
-    if int(message.get('from_id') or 0) != owner or int(message.get('peer_id') or 0) != owner:
+    if int(message.get('peer_id') or 0) != owner:
         return None
     mid = int(message.get('id') or 0)
     cid = int(message.get('conversation_message_id') or 0)
@@ -277,14 +287,16 @@ def verified_message(message, token, owner):
     actual = dict(matches[0])
     # Private callbacks can omit conversation_message_id; VK's verified global
     # message ID is still monotonic for this private dialog.
-    actual['conversation_message_id'] = int(actual.get('conversation_message_id') or actual.get('id') or 0)
+    actual['conversation_message_id'] = int(actual.get('id') or actual.get('conversation_message_id') or 0)
     return actual
 
 
 def handle_message(message, send, token):
     owner = resolve_owner()
-    if int(message.get('from_id') or 0) != owner or int(message.get('peer_id') or 0) != owner:
+    if int(message.get('peer_id') or 0) != owner:
         return False
+    logging.warning('ADMIN_PUBLISH_CALLBACK mid=%s cid=%s author_present=%s',
+                    message.get('id'), message.get('conversation_message_id'), bool(message.get('from_id')))
     actual = verified_message(message, token, owner)
     if not actual:
         return False
@@ -328,9 +340,9 @@ def prepare(send=None, token=None):
         with GoogleDraftStore(owner).locked() as tx:
             if not tx.state:
                 raise ValueError('Invalid draft store')
-            if not tx.exists:
+            if not tx.exists or tx.migrated:
                 tx.save(tx.state)
-        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=2', owner)
+        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=3', owner)
         if send and token:
             recover_command(owner, send, token)
     except Exception:
@@ -338,7 +350,7 @@ def prepare(send=None, token=None):
 
 
 def recover_command(owner, send, token):
-    """Recover an unanswered activation after a restart, never publish a draft."""
+    """Recover a recent activation or unprocessed draft; never publish to chat."""
     params = {'access_token': token, 'v': '5.199', 'peer_id': owner, 'count': 5}
     group = os.environ.get('VK_GROUP_ID', '').strip()
     if group.isdigit():
@@ -351,9 +363,12 @@ def recover_command(owner, send, token):
         return
     incoming = next((m for m in result.get('response', {}).get('items', [])
                      if int(m.get('from_id') or 0) == owner and not m.get('out')), None)
-    if (not incoming or normalized(incoming.get('text', '')) != normalized(PHRASE)
-            or time.time() - int(incoming.get('date') or 0) > TTL):
+    if not incoming or time.time() - int(incoming.get('date') or 0) > TTL:
         return
+    if normalized(incoming.get('text', '')) != normalized(PHRASE):
+        with GoogleDraftStore(owner).locked() as tx:
+            if tx.state.get('phase') not in ('awaiting', 'preview'):
+                return
     actual = verified_message(incoming, token, owner)
     if actual:
         handled = Publisher(owner, GoogleDraftStore(owner), send).message(actual)

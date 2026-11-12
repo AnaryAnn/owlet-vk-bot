@@ -147,6 +147,39 @@ class PublisherTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_verified_global_order_does_not_mix_with_conversation_order(self):
+        response = Mock()
+        drafts, send = Drafts(), Mock()
+        publisher = pub.Publisher(42, drafts, send)
+        for mid, cid, text in [(18, 900, pub.PHRASE), (20, 2, 'Текст с картинкой')]:
+            actual = dict(id=mid, conversation_message_id=cid, from_id=42, peer_id=42,
+                          date=int(time.time()), text=text, out=0)
+            response.json.return_value = {'response': {'items': [actual]}}
+            with patch.object(pub.requests, 'post', return_value=response):
+                verified = pub.verified_message(dict(id=mid, peer_id=42), 'token', 42)
+            publisher.message(verified)
+        self.assertEqual(drafts.state['phase'], 'preview')
+        self.assertEqual(drafts.state['text'], 'Текст с картинкой')
+        self.assertEqual(drafts.state['last_cid'], 20)
+
+    def test_missing_callback_author_routes_to_independent_vk_verification(self):
+        with patch.object(app, 'VK_GROUP_ID', '17'), patch.object(pub, 'handle_message') as handle:
+            app.process_vk_event({'type': 'message_new', 'group_id': 17,
+                'object': {'message': {'id': 20, 'peer_id': 42, 'text': 'Не доверяем этому тексту'}}})
+        handle.assert_called_once()
+
+    def test_active_draft_recovery_shows_preview_without_posting(self):
+        actual = dict(id=20, from_id=42, peer_id=42, date=int(time.time()), text='Пост', out=0)
+        response = Mock(); response.json.return_value = {'response': {'items': [actual]}}
+        drafts, send = Drafts(), Mock()
+        drafts.state.update(phase='awaiting', expires=time.time()+600, last_cid=18)
+        with patch.object(pub.requests, 'post', return_value=response), \
+             patch.object(pub, 'verified_message', return_value=dict(actual, conversation_message_id=20)), \
+             patch.object(pub, 'GoogleDraftStore', return_value=drafts):
+            pub.recover_command(42, send, 'token')
+        self.assertEqual(drafts.state['phase'], 'preview')
+        self.assertTrue(all(c.args[0] == 42 for c in send.call_args_list))
+
     def test_private_callback_without_conversation_id_uses_verified_message_id(self):
         actual = dict(id=18, from_id=42, peer_id=42, date=int(time.time()), text=pub.PHRASE, out=0)
         response = Mock(); response.json.return_value = {'response': {'items': [actual]}}
