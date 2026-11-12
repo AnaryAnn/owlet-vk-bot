@@ -1,10 +1,12 @@
 """Правила «Книги приключений», перенесённые из квесты.gs без Apps Script."""
 import math
 import os
+import time
+import random
 from datetime import datetime, timezone
 
 from sheets_api import _session, _quote
-from website_store import Sheets, append, update
+from website_store import Sheets, append, update, Busy
 
 
 def now_iso():
@@ -213,7 +215,15 @@ def dispatch(action, **data):
     book = os.environ.get('QUEST_SPREADSHEET_ID', '').strip()
     if not book:
         raise RuntimeError('Не задан QUEST_SPREADSHEET_ID')
-    with _session(write=True) as session:
-        api = Sheets(session)
-        with api.locked(book):
-            return quest_action(api, book, action, data)
+    for attempt in range(5):
+        try:
+            with _session(write=True) as session:
+                api = Sheets(session)
+                with api.locked(book):
+                    return quest_action(api, book, action, data)
+        except Busy:
+            if attempt == 4:
+                raise
+            # Busy означает отказ ДО входа в критическую секцию. Не повторяем
+            # сетевые таймауты/неопределённую запись и никогда не удаляем чужой замок.
+            time.sleep(0.3 * (2 ** attempt) + random.uniform(0, 0.15))

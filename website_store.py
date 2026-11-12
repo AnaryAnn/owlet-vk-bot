@@ -132,8 +132,21 @@ class Sheets:
         try:
             self.batch(book, [{'createDeveloperMetadata': {'developerMetadata': metadata}}])
         except requests.HTTPError as exc:
-            if exc.response.status_code == 400:
-                raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
+            if exc.response is not None and exc.response.status_code == 400:
+                try:
+                    message = str(exc.response.json().get('error', {}).get('message', '')).lower()
+                except (ValueError, TypeError, AttributeError):
+                    message = ''
+                # Точный отказ в создании уже существующего metadataId остаётся
+                # конфликтом, даже если владелец успел отпустить замок до чтения.
+                duplicate = (str(LOCK_ID) in message and 'metadata' in message
+                             and ('already exists' in message or 'already in use' in message))
+                if not duplicate:
+                    current = self.get(book, fields='developerMetadata').get('developerMetadata', [])
+                    duplicate = any(m.get('metadataId') == LOCK_ID and m.get('metadataKey') == LOCK_KEY
+                                    for m in current)
+                if duplicate:
+                    raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
             raise
         try:
             yield
