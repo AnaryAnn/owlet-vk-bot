@@ -1,30 +1,24 @@
-"""Temporary non-cell write verification; no participant data is modified."""
+"""Temporary audit-only write probe; no participant records are modified."""
 import logging
 import uuid
 import requests
-from sheets_api import SHEET_ID, _session
-from website_store import Sheets
+from urllib.parse import quote
+from sheets_api import SHEET_ID, _session, read_value_ranges
 
 
 def probe(app):
-    key = 'owlet_diagnostic_' + uuid.uuid4().hex
+    key = 'diagnostic-' + uuid.uuid4().hex
     with _session(write=True) as session:
-        api = Sheets(session)
-        def exists():
-            data = api.get(SHEET_ID, fields='developerMetadata')
-            return any(m.get('metadataKey') == key for m in data.get('developerMetadata', []))
-        for operation in ['create', 'delete']:
-            body = ({'createDeveloperMetadata': {'developerMetadata': {
-                'metadataKey': key, 'metadataValue': 'temporary',
-                'location': {'spreadsheet': True}, 'visibility': 'DOCUMENT'}}} if operation == 'create' else
-                {'deleteDeveloperMetadata': {'dataFilter': {'developerMetadataLookup': {'metadataKey': key}}}})
-            try:
-                response = session.post('https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID + ':batchUpdate',
-                    json={'requests': [body]}, timeout=(5, 5))
-                logging.warning('SHEETS_COMMIT operation=%s status=%s', operation, response.status_code)
-            except requests.RequestException as exc:
-                logging.warning('SHEETS_COMMIT operation=%s error=%s', operation, type(exc).__name__)
-            try:
-                logging.warning('SHEETS_COMMIT after=%s exists=%s', operation, exists())
-            except Exception as exc:
-                logging.warning('SHEETS_COMMIT verification_error=%s', type(exc).__name__)
+        base = 'https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID
+        try:
+            response = session.post(base + '/values/' + quote("'_WebsiteReports'!A:C", safe='') + ':append',
+                params={'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'},
+                json={'values': [[key, 'diagnostic', '{"success":true,"diagnostic":true}']]}, timeout=(5, 8))
+            logging.warning('SHEETS_VALUES_WRITE status=%s', response.status_code)
+        except requests.RequestException as exc:
+            logging.warning('SHEETS_VALUES_WRITE error=%s', type(exc).__name__)
+        try:
+            rows = read_value_ranges(session, SHEET_ID, ["'_WebsiteReports'!A2:A"])[0]['values']
+            logging.warning('SHEETS_VALUES_WRITE committed=%s', any(r and r[0] == key for r in rows))
+        except Exception as exc:
+            logging.warning('SHEETS_VALUES_WRITE verification_error=%s', type(exc).__name__)
