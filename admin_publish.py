@@ -326,9 +326,27 @@ def handle_message(message, send, token):
 
 
 def handle_callback(event, send, token):
+    """Legacy callback buttons only refresh controls; publishing requires a verified DM."""
     owner = resolve_owner()
+    handled = True
     try:
-        handled = Publisher(owner, GoogleDraftStore(owner), send).callback(event)
+        if int(event.get('user_id') or 0) != owner or int(event.get('peer_id') or 0) != owner:
+            return True
+        payload = event.get('payload') or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict) or payload.get('kind') != 'admin_publish':
+            return False
+        with GoogleDraftStore(owner).locked() as tx:
+            nonce = tx.state.get('nonce')
+            if not nonce or payload.get('nonce') != nonce:
+                return True
+            if tx.state.get('phase') in ('preview', 'sending'):
+                send(owner, 'Подтверждение обновлено. Используй эти кнопки в личных сообщениях.',
+                     keyboard=keyboard(nonce, retry=tx.state['phase'] == 'sending'),
+                     random_id='admin-refresh-controls:' + nonce)
+            else:
+                send(owner, 'Этот черновик уже закрыт.', random_id='admin-closed-controls:' + nonce)
     except Exception:
         logging.exception('ADMIN_PUBLISH confirmation failed')
         # Keep the same draft/send identity when the storage outcome is uncertain.
@@ -360,42 +378,13 @@ def prepare(send=None, token=None):
                 tx.save(tx.state)
         logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=4', owner)
         if send and token:
-            recover_confirmed_publication(owner, send, token)
             recover_command(owner, send, token)
     except Exception:
         logging.exception('ADMIN_PUBLISH initialization failed')
 
 
-def recover_confirmed_publication(owner, send, token):
-    """One-off recovery of message 20, explicitly confirmed by its owner.
-
-    The owner's reported click is recorded at 2026-11-12 19:04:30 UTC. Verify the
-    exact original VK content, preserve the send identity, and skip any edited,
-    cancelled or already closed draft. No other message can be published here.
-    """
-    from datetime import datetime, timezone
-    approved_at = datetime(2026, 11, 12, 19, 4, 30, tzinfo=timezone.utc).timestamp()
-    if owner != 54341305 or time.time() > approved_at + 3600:
-        return
-    store = GoogleDraftStore(owner)
-    with store.locked() as tx:
-        state = dict(tx.state)
-        if state.get('last_cid') != 20 or state.get('phase') not in ('preview', 'sending'):
-            logging.warning('ADMIN_PUBLISH_APPROVED_RECOVERY skipped phase=%s', state.get('phase'))
-            return
-        actual = verified_message({'id': 20, 'peer_id': owner}, token, owner, max_age=None)
-        if (not actual or content(actual) != (state.get('text'), state.get('attachment'))
-                or approved_at > state.get('expires', 0)):
-            logging.warning('ADMIN_PUBLISH_APPROVED_RECOVERY snapshot mismatch')
-            return
-        nonce = state['nonce']
-    Publisher(owner, store, send, now=lambda: approved_at).callback({
-        'user_id': owner, 'peer_id': owner,
-        'payload': {'kind': 'admin_publish', 'nonce': nonce, 'action': 'send'}})
-
-
 def recover_command(owner, send, token):
-    """Recover a recent activation or unprocessed draft; never publish to chat."""
+    """Recover a recent verified DM, including an explicit owner's confirmation."""
     params = {'access_token': token, 'v': '5.199', 'peer_id': owner, 'count': 5}
     group = os.environ.get('VK_GROUP_ID', '').strip()
     if group.isdigit():

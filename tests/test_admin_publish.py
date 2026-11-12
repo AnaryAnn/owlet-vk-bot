@@ -166,21 +166,18 @@ class PublisherTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
-    def test_approved_recovery_checks_original_content_and_uses_existing_identity(self):
-        from datetime import datetime, timezone
-        now = datetime(2026, 11, 12, 19, 6, tzinfo=timezone.utc).timestamp()
-        store, send = Drafts(), Mock(return_value={'response': 555})
-        store.state = dict(phase='preview', last_cid=20, nonce='a'*32, text='Одобрено',
-                           attachment='', expires=now+300)
-        actual = dict(id=20, from_id=54341305, peer_id=54341305, text='Одобрено')
-        with patch.object(pub, 'GoogleDraftStore', return_value=store), \
-             patch.object(pub, 'verified_message', return_value=actual), patch.object(pub.time, 'time', return_value=now):
-            pub.recover_confirmed_publication(54341305, send, 'token')
-            pub.recover_confirmed_publication(54341305, send, 'token')
-        posts = [c for c in send.call_args_list if c.args[0] == pub.TARGET]
-        self.assertEqual(len(posts), 1)
-        self.assertEqual(posts[0].kwargs['random_id'], 'admin-publish:' + 'a'*32)
-        self.assertEqual(store.state['phase'], 'closed')
+    def test_legacy_callback_cannot_publish_without_verified_private_command(self):
+        drafts, send = Drafts(), Mock()
+        drafts.state.update(phase='preview', nonce='a'*32, text='Текст', attachment='')
+        response = Mock()
+        with patch.object(pub, 'resolve_owner', return_value=42), \
+             patch.object(pub, 'GoogleDraftStore', return_value=drafts), \
+             patch.object(pub.requests, 'post', return_value=response):
+            pub.handle_callback(dict(user_id=42, peer_id=42, event_id='event', payload=dict(
+                kind='admin_publish', nonce='a'*32, action='send')), send, 'token')
+        self.assertTrue(all(c.args[0] == 42 for c in send.call_args_list))
+        self.assertEqual(drafts.state['phase'], 'preview')
+
 
     def test_verified_global_order_does_not_mix_with_conversation_order(self):
         response = Mock()
