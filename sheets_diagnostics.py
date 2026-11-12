@@ -19,12 +19,14 @@ def probe(app):
             # Empty atomic batch verifies the write endpoint without changing cells.
             started = time.monotonic()
             key = 'owlet_diagnostic_' + uuid.uuid4().hex
-            api.batch(SHEET_ID, [
+            response = session.post('https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID + ':batchUpdate',
+                params={'fields': 'spreadsheetId,replies'}, json={'requests': [
                 {'createDeveloperMetadata': {'developerMetadata': {
                     'metadataKey': key, 'metadataValue': 'temporary',
                     'location': {'spreadsheet': True}, 'visibility': 'DOCUMENT'}}},
                 {'deleteDeveloperMetadata': {'dataFilter': {'developerMetadataLookup': {'metadataKey': key}}}}
-            ])
+            ]}, timeout=(5, 185))
+            response.raise_for_status()
             logging.warning('SHEETS_VERIFY metadata_roundtrip=ok seconds=%.2f', time.monotonic()-started)
     except Exception as exc:
         logging.warning('SHEETS_VERIFY write_error=%s', type(exc).__name__)
