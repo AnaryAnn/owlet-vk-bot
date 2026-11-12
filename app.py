@@ -1800,10 +1800,6 @@ def quest_tick_route():
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
-if os.environ.get('RENDER') == 'true':
-    from sheets_diagnostics import probe as probe_sheets
-    threading.Thread(target=probe_sheets, args=(app,), daemon=True).start()
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
