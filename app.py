@@ -1113,7 +1113,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 3, "questLockRetryVersion": 1,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1367,14 +1367,64 @@ def statistics_schedule():
         }, 500
 
 
+def vote_feedback(user_id, peer_id, event_id, text):
+    """Уведомление участнику; подтверждения и ошибки не публикуются в беседе."""
+    try:
+        vk_send(int(user_id), text, random_id=f'vote-dm:{user_id}:{peer_id}:{event_id}' if event_id else None)
+    except Exception:
+        app.logger.warning('VK не подтвердил личное уведомление о голосе')
+    if event_id:
+        try:
+            response = requests.post('https://api.vk.com/method/messages.sendMessageEventAnswer',
+                data={'access_token': VK_TOKEN, 'v': '5.199', 'event_id': event_id,
+                      'user_id': int(user_id), 'peer_id': int(peer_id),
+                      'event_data': json.dumps({'type': 'show_snackbar', 'text': text[:90]}, ensure_ascii=False)},
+                timeout=10)
+            response.raise_for_status()
+            if response.json().get('error'):
+                app.logger.warning('VK не подтвердил уведомление возле кнопки')
+        except Exception:
+            app.logger.warning('Не удалось подтвердить уведомление возле кнопки')
+
+
+def process_quest_vote_callback(event):
+    from quest_votes import parse_payload
+    from quest_engine import quest_api
+    try:
+        user_id, peer_id = int(event.get('user_id') or 0), int(event.get('peer_id') or 0)
+        event_id = event.get('event_id')
+        selection = parse_payload(event.get('payload'))
+        if (not selection or user_id <= 0 or peer_id < 2000000000
+                or not isinstance(event_id, str) or not 1 <= len(event_id) <= 256):
+            return
+    except (ValueError, TypeError):
+        return
+    try:
+        result = quest_api('vote', **selection, peerId=str(peer_id), vkId=str(user_id),
+                           source='callback', eventId=event_id)
+        text = ('🗳 Голос ' + ('изменён' if result.get('changed') else 'принят') +
+                f": вариант {result['choice']}.")
+        if result.get('duplicate'):
+            text = f"🗳 Твой текущий голос: вариант {result['choice']}."
+    except ValueError as exc:
+        text = '🗳 ' + str(exc)
+    except Exception:
+        app.logger.exception('Не удалось сохранить голос с callback-кнопки')
+        text = '🗳 Голос не сохранён. Нажми кнопку ещё раз чуть позже.'
+    vote_feedback(user_id, peer_id, event_id, text)
+
+
 def process_vk_event(data):
     """Обработка события вне HTTP-запроса VK."""
     try:
         if data.get("type") == "confirmation":
             return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
-        if data.get("type") != "message_new":
+        if data.get("type") not in ("message_new", "message_event"):
             return Response("ok")
         if str(data.get("group_id","")) != VK_GROUP_ID:
+            return Response("ok")
+        if data.get("type") == "message_event":
+            process_quest_vote_callback(data.get("object") or {})
             return Response("ok")
 
         msg = ((data.get("object") or {}).get("message") or {})
@@ -1401,14 +1451,14 @@ def process_vk_event(data):
                 result = quest_api('vote', **selection, peerId=str(peer_id), vkId=str(user_id),
                     messageId=int(msg.get('conversation_message_id') or msg.get('id') or 0))
             except ValueError as exc:
-                vk_send(peer_id, '🗳 ' + str(exc))
+                vote_feedback(user_id, peer_id, None, '🗳 ' + str(exc))
                 return Response("ok")
             except Exception:
                 app.logger.exception('Не удалось сохранить голос')
-                vk_send(peer_id, '🗳 Не удалось сохранить голос. Нажми кнопку ещё раз чуть позже.')
+                vote_feedback(user_id, peer_id, None, '🗳 Не удалось сохранить голос. Нажми кнопку ещё раз чуть позже.')
                 return Response("ok")
             if not result.get('duplicate'):
-                vk_send(peer_id, f"🗳 [id{user_id}|Голос] " +
+                vote_feedback(user_id, peer_id, None, "🗳 Голос " +
                     ('изменён' if result.get('changed') else 'принят') + f": вариант {result['choice']}.")
             return Response("ok")
 
@@ -1600,7 +1650,7 @@ def vk_callback():
     data = request.get_json(silent=True) or {}
     if data.get("type") == "confirmation":
         return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
-    if data.get("type") != "message_new":
+    if data.get("type") not in ("message_new", "message_event"):
         return Response("ok", mimetype="text/plain")
     if str(data.get("group_id", "")) != VK_GROUP_ID:
         return Response("ok", mimetype="text/plain")

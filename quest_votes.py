@@ -67,7 +67,12 @@ def vote(api, book, data):
         raise ValueError('Эта кнопка устарела. Выбери вариант в текущем объявлении квеста')
     if datetime.now(timezone.utc) >= deadline(stage):
         raise ValueError('Приём голосов завершён')
-    choice, user, message = int(data['choice']), str(data['vkId']), int(data['messageId'])
+    choice, user = int(data['choice']), str(data['vkId'])
+    callback = data.get('source') == 'callback'
+    event_id = data.get('eventId') if callback else None
+    if callback and (not isinstance(event_id, str) or not 1 <= len(event_id) <= 256):
+        raise ValueError('Неверный идентификатор нажатия')
+    message = 1 if callback else int(data['messageId'])
     if not user.isdigit() or int(user) <= 0 or message <= 0 or not 1 <= choice <= len(choices):
         raise ValueError('Неверный участник или номер варианта')
     sid = api.ensure_tab(book, 'Голоса', HEADERS)
@@ -76,12 +81,30 @@ def vote(api, book, data):
         raise ValueError('Неверные колонки листа Голоса; см. QUEST_VOTING.md')
     old = next((r for r in rows if r['quest_id'] == quest['quest_id'] and r['stage_id'] == stage['stage_id']
                 and str(r['peer_id']) == str(data['peerId']) and str(r['vk_id']) == user), None)
-    if old and int(old['message_id']) >= message:
+    event_write = None
+    if callback:
+        event_headers = ['event_key', 'quest_id', 'stage_id', 'peer_id', 'vk_id', 'created_ISO']
+        event_sid = api.ensure_tab(book, '_QuestVoteEvents', event_headers)
+        actual_headers, events = table(api, book, '_QuestVoteEvents')
+        if actual_headers != event_headers:
+            raise ValueError('Неверные колонки журнала нажатий')
+        event_key = hashlib.sha256(json.dumps([str(data['peerId']), user, event_id]).encode()).hexdigest()
+        if any(e['event_key'] == event_key for e in events):
+            return dict(success=True, duplicate=True, choice=int(old['choice']) if old else choice)
+        # Callback API не передаёт порядковый номер клика. Назначаем порядок
+        # обработки под замком; повтор уже принятого event_id ничего не меняет.
+        message = int(old['message_id']) + 1 if old else 1
+        event_write = append(event_sid, [event_key, quest['quest_id'], stage['stage_id'],
+            str(data['peerId']), user, now_iso()])
+    if not callback and old and int(old['message_id']) >= message:
         return dict(success=True, duplicate=True, choice=int(old['choice']))
     if old and old.get('revision') != revision:
         raise ValueError('Нельзя менять настройки уже начатого голосования. Используйте новый stage_id')
     values = [quest['quest_id'], stage['stage_id'], str(data['peerId']), user, choice, message, now_iso(), revision]
-    api.batch(book, [update(sid, old['_row'], 0, values) if old else append(sid, values)])
+    writes = [update(sid, old['_row'], 0, values) if old else append(sid, values)]
+    if event_write:
+        writes.append(event_write)
+    api.batch(book, writes)
     return dict(success=True, changed=bool(old), choice=choice)
 
 
@@ -132,7 +155,7 @@ def keyboard(quest, stage, choices):
         label = f"{i}. {choice['текст']}"
         if len(label) > 40:
             label = label[:39] + '…'
-        buttons.append([dict(action=dict(type='text', label=label,
+        buttons.append([dict(action=dict(type='callback', label=label,
             payload=json.dumps(payload, ensure_ascii=False, separators=(',', ':'))), color='primary')])
     return dict(inline=True, one_time=False, buttons=buttons)
 

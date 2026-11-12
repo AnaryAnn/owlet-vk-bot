@@ -27,6 +27,7 @@ class VotingSheets(QuestSheets):
         stage[2] = 'vote'
         stage += [json.dumps([{'текст': 'Лес', 'этап': 'ok'}, {'текст': 'Горы', 'этап': 'fail'}]), '']
     def ensure_tab(self, book, name, headers):
+        self.sheets.setdefault(name, [headers])
         return self.tabs(book)[name]['sheetId']
 
 
@@ -55,7 +56,7 @@ class VotingTests(unittest.TestCase):
         result = self.tick()
         text = result['outbox'][0]['text']
         self.assertIn('Нажми кнопку', text)
-        self.assertEqual(result['outbox'][0]['keyboard']['buttons'][0][0]['action']['type'], 'text')
+        self.assertEqual(result['outbox'][0]['keyboard']['buttons'][0][0]['action']['type'], 'callback')
         self.assertIn('МСК', text)
         self.assertEqual(self.api.sheets['Квесты'][1][2], 'running')
         self.assertEqual(self.tick()['transitions'], [])
