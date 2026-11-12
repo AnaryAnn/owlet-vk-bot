@@ -3,6 +3,9 @@ import json
 import math
 import os
 import re
+import time
+import logging
+import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,6 +15,23 @@ from google.oauth2 import service_account
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 SHEET_ID = os.environ.get("STATS_SPREADSHEET_ID", "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60")
 TIMEZONE = os.environ.get("STATS_TIMEZONE", "Europe/Moscow")
+
+
+def read_response(session, url, params=None, timeout=25):
+    """Повторяем только чтение; записи с неопределённым результатом не трогаем."""
+    for attempt in range(2):
+        try:
+            response = session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt:
+                raise
+        except requests.HTTPError as exc:
+            if attempt or exc.response is None or exc.response.status_code not in (429, 500, 502, 503, 504):
+                raise
+        logging.warning('Повтор чтения Google Sheets после временной ошибки; записи не повторяются')
+        time.sleep(.3)
 
 
 def _session(write=False):
@@ -52,7 +72,7 @@ def read_current_stats(week=None):
     ranges = [f"{_quote('Участники')}!A2:C", f"{_quote(week['sheetName'])}!B2",
               f"{_quote(week['sheetName'])}!A8:D"]
     with _session() as session:
-        response = session.get(
+        response = read_response(session,
             f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchGet",
             params={"ranges": ranges, "valueRenderOption": "FORMATTED_VALUE"}, timeout=25)
         response.raise_for_status()
@@ -111,7 +131,7 @@ def read_stats_history():
     """Только чтение: список недель и их отчёты, пакетами по 40 листов."""
     with _session() as session:
         base = f'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}'
-        response = session.get(base, params={'fields': 'sheets.properties.title'}, timeout=25)
+        response = read_response(session, base, params={'fields': 'sheets.properties.title'}, timeout=25)
         response.raise_for_status()
         weeks = [w for sheet in response.json().get('sheets', [])
                  if (w := _history_week(sheet.get('properties', {}).get('title', '')))]
@@ -120,7 +140,7 @@ def read_stats_history():
         for offset in range(0, len(weeks), 40):
             batch = weeks[offset:offset + 40]
             ranges = [f"{_quote(w['sheetName'])}!{cells}" for w in batch for cells in ('B2', 'A8:D')]
-            response = session.get(base + '/values:batchGet', params={
+            response = read_response(session, base + '/values:batchGet', params={
                 'ranges': ranges, 'valueRenderOption': 'FORMATTED_VALUE'}, timeout=25)
             response.raise_for_status()
             values = response.json().get('valueRanges', [])

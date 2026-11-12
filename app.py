@@ -1113,7 +1113,9 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "questLockRetryVersion": 1,
+    from sheets_api import SHEET_ID
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 1,
+            "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1517,7 +1519,7 @@ def process_vk_event(data):
                     daemon=True,
                 ).start()
             else:
-                vk_send(peer_id, "Не удалось сохранить данные.")
+                vk_send(peer_id, "🦉 Не удалось подтвердить сохранение отчёта. Повтори его чуть позже.")
 
             return Response("ok")
 
@@ -1636,7 +1638,7 @@ def process_vk_event(data):
                     daemon=True,
                 ).start()
         else:
-            vk_send(peer_id, "Не удалось сохранить данные.")
+            vk_send(peer_id, "🦉 Не удалось подтвердить сохранение отчёта. Повтори его чуть позже.")
 
         return Response("ok")
     except Exception as e:
@@ -1716,8 +1718,22 @@ def send_owlet_message_route():
 
 
 def google_save_report(vk_id, plan, fact, report_id, attempts=3):
-    return google_post({"action": "vkSave", "vkId": str(vk_id), "plan": int(plan),
-                        "fact": int(fact), "reportId": str(report_id)})
+    from website_store import Busy
+    payload = {"action": "vkSave", "vkId": str(vk_id), "plan": int(plan),
+               "fact": int(fact), "reportId": str(report_id)}
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return google_post(payload)
+        except Busy:
+            if attempt + 1 < max(1, int(attempts)):
+                time.sleep(.5 * (attempt + 1))
+                continue
+            app.logger.exception('REPORT SAVE BUSY report_id=%s', report_id)
+        except Exception:
+            # Не повторяем неопределённую запись. Отчёт должен получить ответ
+            # в беседе, даже если Google не подтвердил сохранение.
+            app.logger.exception('REPORT SAVE FAILED report_id=%s', report_id)
+        return {'success': False, 'error': 'Сохранение отчёта не подтверждено'}
 
 def google_sync_participants(members, sync_id):
     return google_post({"action": "syncParticipants", "members": members, "syncId": sync_id})

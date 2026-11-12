@@ -35,8 +35,7 @@ def formulas(sid, active):
 
 
 def participant_rows(api):
-    if 'Участники' not in api.tabs(SHEET_ID):
-        raise ValueError('Нет листа «Участники». Начальный список не восстанавливается')
+    # Читаем конкретный диапазон напрямую, без запроса всех листов книги.
     return api.values(SHEET_ID, ["'Участники'!A2:C"])[0]
 
 

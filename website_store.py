@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from report_comments import append_overplan_comment
-from sheets_api import _session, _quote, _number, current_week, SHEET_ID, TIMEZONE
+from sheets_api import _session, _quote, _number, current_week, SHEET_ID, TIMEZONE, read_response
 
 ARTIFACTS_ID = os.environ.get('ARTIFACTS_SPREADSHEET_ID',
     '1xpcRGO2i2nw6TAik3NskITxwAM6e7831LaSigDR3sRk')
@@ -84,13 +84,16 @@ class Sheets:
     def __init__(self, session):
         self.session = session
         self.uncertain = False
+        self._tabs_cache = {}
 
     def get(self, book, suffix='', **params):
-        r = self.session.get(BASE + book + suffix, params=params, timeout=20)
+        r = read_response(self.session, BASE + book + suffix, params=params, timeout=20)
         r.raise_for_status()
         return r.json()
 
     def batch(self, book, requests_list):
+        if any(k in w for w in requests_list for k in ('addSheet', 'deleteSheet', 'updateSheetProperties')):
+            self._tabs_cache.pop(book, None)
         try:
             r = self.session.post(BASE + book + ':batchUpdate',
                                   json={'requests': requests_list}, timeout=20)
@@ -108,8 +111,10 @@ class Sheets:
             ranges=ranges, valueRenderOption='FORMATTED_VALUE' if formatted else 'UNFORMATTED_VALUE').get('valueRanges', [])]
 
     def tabs(self, book):
-        return {s['properties']['title']: s['properties'] for s in self.get(book,
-            fields='sheets.properties').get('sheets', [])}
+        if book not in self._tabs_cache:
+            self._tabs_cache[book] = {s['properties']['title']: s['properties'] for s in self.get(book,
+                fields='sheets(properties(sheetId,title))').get('sheets', [])}
+        return self._tabs_cache[book]
 
     def ensure_tab(self, book, title, headers, hidden=True):
         tabs = self.tabs(book)
@@ -164,7 +169,7 @@ def stamp():
 
 def _journal(api):
     tab = api.ensure_tab(SHEET_ID, '_WebsiteReports', ['request_id', 'fingerprint', 'result_json'])
-    rows = api.values(SHEET_ID, ["'_WebsiteReports'!A2:C"])[0]
+    rows = api.values(SHEET_ID, ["'_WebsiteReports'!A2:B"])[0]
     return tab, rows
 
 
@@ -174,9 +179,10 @@ def save_report(api, name, plan, fact, report_id):
         digest = fingerprint(name, plan, fact)
         for i, row in enumerate(journal):
             if row and row[0] == report_id:
-                if len(row) < 3 or row[1] != digest:
+                if len(row) < 2 or row[1] != digest:
                     raise Conflict('requestId уже использован для других данных')
-                return json.loads(row[2]), journal_id, i + 1
+                saved = api.values(SHEET_ID, [f"'_WebsiteReports'!C{i + 2}"])[0]
+                return json.loads(saved[0][0]), journal_id, i + 1
         week = current_week()
         tabs = api.tabs(SHEET_ID)
         participants = api.values(SHEET_ID, ["'Участники'!A2:C"])[0]
