@@ -11,6 +11,7 @@ import random
 import re
 import time
 import uuid
+from urllib.parse import quote
 from contextlib import contextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -23,6 +24,9 @@ ARTIFACTS_ID = os.environ.get('ARTIFACTS_SPREADSHEET_ID',
     '1xpcRGO2i2nw6TAik3NskITxwAM6e7831LaSigDR3sRk')
 LOCK_ID = 1937152401
 LOCK_KEY = 'owlet_shared_write_v1'
+STATS_LOCK_ID = 1937152402
+STATS_LOCK_KEY = 'owlet_stats_write_v2'
+STATS_LOCK_BOOK = os.environ.get('STATS_LOCK_SPREADSHEET_ID') or os.environ.get('QUEST_SPREADSHEET_ID') or ARTIFACTS_ID
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
 
 
@@ -92,11 +96,17 @@ class Sheets:
         return r.json()
 
     def batch(self, book, requests_list):
+        if book == SHEET_ID and requests_list and all(
+                set(w) <= {'updateCells', 'appendCells'} and len(w) == 1 for w in requests_list):
+            return self._literal_batch(book, requests_list)
         if any(k in w for w in requests_list for k in ('addSheet', 'deleteSheet', 'updateSheetProperties')):
             self._tabs_cache.pop(book, None)
+        return self._post(book, ':batchUpdate', {'requests': requests_list})
+
+    def _post(self, book, suffix, payload, params=None):
         try:
-            r = self.session.post(BASE + book + ':batchUpdate',
-                                  json={'requests': requests_list}, timeout=20)
+            kwargs = {'params': params} if params else {}
+            r = self.session.post(BASE + book + suffix, json=payload, timeout=20, **kwargs)
         except requests.RequestException as exc:
             self.uncertain = True
             raise Uncertain('Результат записи требует проверки') from exc
@@ -105,6 +115,74 @@ class Sheets:
             raise Uncertain('Результат записи требует проверки')
         r.raise_for_status()
         return r.json()
+
+    def _literal_batch(self, book, requests_list):
+        """Reserve append capacity, then commit data and its journal atomically.
+
+        A reservation contains no report ID or success result. A failed commit
+        therefore cannot be mistaken for a saved report on a retry.
+        """
+        def column(index):
+            result = ''
+            index += 1
+            while index:
+                index, remainder = divmod(index - 1, 26)
+                result = chr(65 + remainder) + result
+            return result
+        prepared = []
+        has_formula = False
+        for request in requests_list:
+            operation = request.get('updateCells') or request.get('appendCells')
+            if operation.get('fields') != 'userEnteredValue' or not operation.get('rows'):
+                return self._post(book, ':batchUpdate', {'requests': requests_list})
+            rows = []
+            for row in operation['rows']:
+                cells = []
+                for cell_data in row.get('values', []):
+                    value = cell_data.get('userEnteredValue', {})
+                    if set(value) - {'stringValue', 'numberValue', 'boolValue', 'formulaValue'}:
+                        raise ValueError('Unsupported cell value')
+                    has_formula |= 'formulaValue' in value
+                    cells.append(value)
+                rows.append(cells)
+            prepared.append((operation, rows, 'appendCells' in request))
+        tabs = {p['sheetId']: title for title, p in self.tabs(book).items()}
+        data = []
+        for operation, rows, is_append in prepared:
+            start = operation if is_append else operation['start']
+            title = tabs[start['sheetId']]
+            width = max(len(row) for row in rows)
+            if not width:
+                raise ValueError('Empty update')
+            if is_append:
+                # The last occupied row anchors append below all existing data.
+                existing = self.values(book, [f'{_quote(title)}!A:{column(width - 1)}'])[0]
+                anchor = max(1, len(existing))
+                reserved = self._post(book,
+                    '/values/' + quote(f'{_quote(title)}!A{anchor}:{column(width-1)}{anchor}', safe='') + ':append',
+                    {'values': [['reserved-' + uuid.uuid4().hex] for _ in rows]},
+                    {'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'})
+                from sheets_grid import bounds
+                _, row_index, _, _, _ = bounds(reserved['updates']['updatedRange'])
+                if row_index != len(existing):
+                    self.uncertain = True
+                    raise Uncertain('Не подтверждено положение служебной строки')
+                col_index = 0
+            else:
+                row_index, col_index = start.get('rowIndex', 0), start.get('columnIndex', 0)
+            values = []
+            for row in rows:
+                converted = []
+                for cell_value in row:
+                    value = next(iter(cell_value.values()), '')
+                    if has_formula and isinstance(value, str) and 'formulaValue' not in cell_value:
+                        value = "'" + value  # Preserve literal strings in USER_ENTERED mode.
+                    converted.append(value)
+                values.append(converted)
+            data.append({'range': f'{_quote(title)}!{column(col_index)}{row_index+1}:'
+                        f'{column(col_index+width-1)}{row_index+len(rows)}', 'values': values})
+        return self._post(book, '/values:batchUpdate',
+            {'valueInputOption': 'USER_ENTERED' if has_formula else 'RAW', 'data': data})
 
     def values(self, book, ranges, formatted=False):
         if book == SHEET_ID:
@@ -135,8 +213,14 @@ class Sheets:
 
     @contextmanager
     def locked(self, book):
+        lock_id, lock_key = LOCK_ID, LOCK_KEY
+        if book == SHEET_ID:
+            book = STATS_LOCK_BOOK
+            lock_id, lock_key = STATS_LOCK_ID, STATS_LOCK_KEY
+            if book == SHEET_ID:
+                raise ValueError('The statistics lock must use a separate workbook')
         owner = str(uuid.uuid4())
-        metadata = {'metadataId': LOCK_ID, 'metadataKey': LOCK_KEY,
+        metadata = {'metadataId': lock_id, 'metadataKey': lock_key,
             'metadataValue': owner, 'location': {'spreadsheet': True}, 'visibility': 'DOCUMENT'}
         try:
             self.batch(book, [{'createDeveloperMetadata': {'developerMetadata': metadata}}])
@@ -148,11 +232,11 @@ class Sheets:
                     message = ''
                 # Точный отказ в создании уже существующего metadataId остаётся
                 # конфликтом, даже если владелец успел отпустить замок до чтения.
-                duplicate = (str(LOCK_ID) in message and 'metadata' in message
+                duplicate = (str(lock_id) in message and 'metadata' in message
                              and ('already exists' in message or 'already in use' in message))
                 if not duplicate:
                     current = self.get(book, fields='developerMetadata').get('developerMetadata', [])
-                    duplicate = any(m.get('metadataId') == LOCK_ID and m.get('metadataKey') == LOCK_KEY
+                    duplicate = any(m.get('metadataId') == lock_id and m.get('metadataKey') == lock_key
                                     for m in current)
                 if duplicate:
                     raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
@@ -163,8 +247,8 @@ class Sheets:
             # При потере ответа Google замок остаётся; нельзя пропускать новую запись.
             if not self.uncertain:
                 self.batch(book, [{'deleteDeveloperMetadata': {'dataFilter': {
-                    'developerMetadataLookup': {'metadataId': LOCK_ID,
-                        'metadataKey': LOCK_KEY, 'metadataValue': owner}}}}])
+                    'developerMetadataLookup': {'metadataId': lock_id,
+                        'metadataKey': lock_key, 'metadataValue': owner}}}}])
 
 
 def stamp():
@@ -219,7 +303,7 @@ def save_report(api, name, plan, fact, report_id):
             'notificationStatus': 'pending' if changed else 'skipped'}
         journal_row = len(journal) + 1
         # Строка отчёта и защита от повтора — одна атомарная запись Google.
-        api.batch(SHEET_ID, [update(tabs[title]['sheetId'], index, 1, [plan, fact, stamp()]),
+        api.batch(SHEET_ID, [update(tabs[title]['sheetId'], index, 1, [plan, fact, stamp() if changed else old[3]]),
             append(journal_id, [report_id, digest, json.dumps(result, ensure_ascii=False)])])
         return result, journal_id, journal_row
 

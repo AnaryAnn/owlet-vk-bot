@@ -1114,7 +1114,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 2,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3,
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 

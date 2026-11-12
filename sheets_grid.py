@@ -1,4 +1,9 @@
-"""Read values through spreadsheets.get, preserving A1 range order and blanks."""
+"""Read literal input data through spreadsheets.get, preserving order and blanks.
+
+Computed values aren't requested: the production statistics workbook currently
+times out when Google evaluates them. Formula cells fail explicitly instead of
+being mistaken for empty data. Other workbooks keep using the normal Values API.
+"""
 import re
 
 
