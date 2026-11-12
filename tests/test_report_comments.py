@@ -7,9 +7,9 @@ from report_comments import append_overplan_comment, OVERPLAN_COMMENTS
 
 
 class ReportCommentTests(unittest.TestCase):
-    def test_all_twenty_comments_are_available(self):
-        self.assertEqual(len(OVERPLAN_COMMENTS), 20)
-        self.assertEqual(len(set(OVERPLAN_COMMENTS)), 20)
+    def test_all_seventy_comments_are_available(self):
+        self.assertEqual(len(OVERPLAN_COMMENTS), 70)
+        self.assertEqual(len(set(OVERPLAN_COMMENTS)), 70)
 
     def test_no_comment_at_or_below_plan(self):
         for plan, fact in [(30, 29), (30, 30), (0, 0)]:
