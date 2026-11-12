@@ -249,17 +249,36 @@ def verified_message(message, token, owner):
     """
     if int(message.get('from_id') or 0) != owner or int(message.get('peer_id') or 0) != owner:
         return None
+    mid = int(message.get('id') or 0)
     cid = int(message.get('conversation_message_id') or 0)
-    if cid <= 0:
+    if mid <= 0 and cid <= 0:
+        logging.warning('ADMIN_PUBLISH verification has no message identifier')
         return None
-    response = requests.post('https://api.vk.com/method/messages.getByConversationMessageId',
-        data={'access_token': token, 'v': '5.199', 'peer_id': owner, 'conversation_message_ids': cid}, timeout=10)
+    method = 'messages.getById' if mid > 0 else 'messages.getByConversationMessageId'
+    params = {'access_token': token, 'v': '5.199'}
+    params.update({'message_ids': mid} if mid > 0 else {'peer_id': owner, 'conversation_message_ids': cid})
+    group = os.environ.get('VK_GROUP_ID', '').strip()
+    if group.isdigit():
+        params['group_id'] = int(group)
+    response = requests.post('https://api.vk.com/method/' + method, data=params, timeout=10)
     response.raise_for_status()
-    items = response.json().get('response', {}).get('items', [])
-    matches = [m for m in items if int(m.get('conversation_message_id') or 0) == cid
+    result = response.json()
+    if result.get('error'):
+        logging.warning('ADMIN_PUBLISH verification failed method=%s vk_code=%s', method, result['error'].get('error_code'))
+        return None
+    items = result.get('response', {}).get('items', [])
+    matches = [m for m in items if (int(m.get('id') or 0) == mid if mid > 0 else
+                                  int(m.get('conversation_message_id') or 0) == cid)
                and int(m.get('from_id') or 0) == owner and int(m.get('peer_id') or 0) == owner
                and not m.get('out') and time.time() - int(m.get('date') or 0) <= TTL]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) != 1:
+        logging.warning('ADMIN_PUBLISH verification rejected method=%s items=%s', method, len(items))
+        return None
+    actual = dict(matches[0])
+    # Private callbacks can omit conversation_message_id; VK's verified global
+    # message ID is still monotonic for this private dialog.
+    actual['conversation_message_id'] = int(actual.get('conversation_message_id') or actual.get('id') or 0)
+    return actual
 
 
 def handle_message(message, send, token):
@@ -302,8 +321,8 @@ def handle_callback(event, send, token):
     return handled
 
 
-def prepare():
-    """Resolve the organizer and verify the draft store; send no VK messages."""
+def prepare(send=None, token=None):
+    """Initialize storage and recover only a recent, verified owner command."""
     try:
         owner = resolve_owner()
         with GoogleDraftStore(owner).locked() as tx:
@@ -311,6 +330,31 @@ def prepare():
                 raise ValueError('Invalid draft store')
             if not tx.exists:
                 tx.save(tx.state)
-        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=1', owner)
+        logging.warning('ADMIN_PUBLISH_READY owner_vk_id=%s version=2', owner)
+        if send and token:
+            recover_command(owner, send, token)
     except Exception:
         logging.exception('ADMIN_PUBLISH initialization failed')
+
+
+def recover_command(owner, send, token):
+    """Recover an unanswered activation after a restart, never publish a draft."""
+    params = {'access_token': token, 'v': '5.199', 'peer_id': owner, 'count': 5}
+    group = os.environ.get('VK_GROUP_ID', '').strip()
+    if group.isdigit():
+        params['group_id'] = int(group)
+    response = requests.post('https://api.vk.com/method/messages.getHistory', data=params, timeout=10)
+    response.raise_for_status()
+    result = response.json()
+    if result.get('error'):
+        logging.warning('ADMIN_PUBLISH recovery history unavailable vk_code=%s', result['error'].get('error_code'))
+        return
+    incoming = next((m for m in result.get('response', {}).get('items', [])
+                     if int(m.get('from_id') or 0) == owner and not m.get('out')), None)
+    if (not incoming or normalized(incoming.get('text', '')) != normalized(PHRASE)
+            or time.time() - int(incoming.get('date') or 0) > TTL):
+        return
+    actual = verified_message(incoming, token, owner)
+    if actual:
+        handled = Publisher(owner, GoogleDraftStore(owner), send).message(actual)
+        logging.warning('ADMIN_PUBLISH_RECOVERY handled=%s mid=%s', handled, incoming.get('id'))

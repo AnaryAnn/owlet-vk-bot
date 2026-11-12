@@ -1114,7 +1114,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 1,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 2,
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
@@ -1813,7 +1813,7 @@ def quest_tick_route():
 
 if os.environ.get('RENDER') == 'true':
     from admin_publish import prepare as prepare_admin_publish
-    threading.Thread(target=prepare_admin_publish, daemon=True, name='admin-publish-init').start()
+    threading.Thread(target=prepare_admin_publish, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

@@ -147,6 +147,28 @@ class PublisherTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_private_callback_without_conversation_id_uses_verified_message_id(self):
+        actual = dict(id=18, from_id=42, peer_id=42, date=int(time.time()), text=pub.PHRASE, out=0)
+        response = Mock(); response.json.return_value = {'response': {'items': [actual]}}
+        with patch.object(pub.requests, 'post', return_value=response) as request:
+            result = pub.verified_message(dict(actual, text='Forged'), 'token', 42)
+        self.assertTrue(request.call_args.args[0].endswith('messages.getById'))
+        self.assertEqual(result['conversation_message_id'], 18)
+        self.assertEqual(result['text'], pub.PHRASE)
+
+    def test_startup_recovery_only_opens_recent_verified_command_never_posts_to_chat(self):
+        actual = dict(id=18, from_id=42, peer_id=42, date=int(time.time()), text=pub.PHRASE, out=0)
+        response = Mock(); response.json.return_value = {'response': {'items': [actual]}}
+        drafts, send = Drafts(), Mock()
+        with patch.object(pub.requests, 'post', return_value=response), \
+             patch.object(pub, 'verified_message', return_value=dict(actual, conversation_message_id=18)), \
+             patch.object(pub, 'GoogleDraftStore', return_value=drafts):
+            pub.recover_command(42, send, 'token')
+            pub.recover_command(42, send, 'token')
+        self.assertEqual(drafts.state['phase'], 'awaiting')
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.args[0], 42)
+
     def test_verified_content_is_fetched_from_vk_not_callback_body(self):
         actual = dict(from_id=42, peer_id=42, conversation_message_id=3,
                       date=int(time.time()), text='Настоящий текст', out=0)
