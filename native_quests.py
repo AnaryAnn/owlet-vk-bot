@@ -29,9 +29,9 @@ def table(api, book, name):
 
 def quest_action(api, book, action, data):
     """Вызывается под одной блокировкой книги; переход и исходящие — один batch."""
-    if action == "vote":
-        from quest_votes import vote
-        return vote(api, book, data)
+    if action.startswith("poll"):
+        from quest_polls import storage
+        return storage(api, book, action, data)
     tabs = api.tabs(book)
     writes = []
     timestamp = now_iso()
@@ -112,7 +112,7 @@ def quest_action(api, book, action, data):
             append(tabs['Исходящие']['sheetId'], [event_id, quest['quest_id'], stage_id,
                 quest['peer_id'], text, 'pending', timestamp, '']),
             append(tabs['Журнал']['sheetId'], [event_id, quest['quest_id'], stage_id, kind, timestamp, ''])])
-        new_outbox.append({'event_id': event_id, 'peer_id': quest['peer_id'],
+        new_outbox.append({'event_id': event_id, 'quest_id': quest['quest_id'], 'stage_id': stage_id, 'peer_id': quest['peer_id'],
                           'текст': text, 'статус': 'pending'})
     for quest in quests:
         if quest.get('статус') not in ('active', 'running'):
@@ -122,7 +122,7 @@ def quest_action(api, book, action, data):
         if not stage:
             raise ValueError('Этап квеста отсутствует')
         if stage.get('тип') == 'vote':
-            from quest_votes import options, announcement, deadline as vote_deadline, tally
+            from quest_votes import options, announcement, deadline as vote_deadline, summarize
             choices = options(stage, stages)
             if quest['статус'] == 'active':
                 if datetime.now(timezone.utc) >= vote_deadline(stage):
@@ -134,7 +134,12 @@ def quest_action(api, book, action, data):
                 continue
             if datetime.now(timezone.utc) < vote_deadline(stage):
                 continue
-            target_id, summary = tally(api, book, quest, stage, choices)
+            from quest_polls import state
+            poll = state(api, book, quest, stage, choices)
+            if not poll or poll['status'] != 'published' or str(poll.get('closed')) != '1':
+                continue  # Нет подтверждённых итогов VK — ветку не выбираем.
+            import json
+            target_id, summary = summarize(stage, choices, json.loads(poll['votes_JSON']))
             target = next(s for s in stages if s['quest_id'] == quest['quest_id'] and s['stage_id'] == target_id)
             transitions.append({'quest': quest['quest_id'], 'kind': 'vote_result', 'to': target_id})
             if not dry:
@@ -183,9 +188,17 @@ def quest_action(api, book, action, data):
             writes.append(update(tabs['Квесты']['sheetId'], quest['_row'], 2, [status, target_id]))
     if writes:
         api.batch(book, writes)
-    return {'success': True, 'transitions': transitions, 'outbox': [
-        {'eventId': r['event_id'], 'peerId': r['peer_id'], 'text': r['текст']}
-        for r in outbox + new_outbox if r.get('статус') == 'pending']}
+    outgoing = []
+    for row in outbox + new_outbox:
+        if row.get('статус') != 'pending':
+            continue
+        item = dict(eventId=row['event_id'], peerId=row['peer_id'], text=row['текст'])
+        source = next((s for s in stages if s['quest_id'] == row.get('quest_id')
+                       and s['stage_id'] == row.get('stage_id')), None)
+        if source and source.get('тип') == 'vote' and not row['event_id'].endswith(':vote_result'):
+            item['poll'] = dict(questId=source['quest_id'], stageId=source['stage_id'])
+        outgoing.append(item)
+    return {'success': True, 'transitions': transitions, 'outbox': outgoing}
 
 
 def dispatch(action, **data):

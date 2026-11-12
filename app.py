@@ -1108,7 +1108,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 1,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 2,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1379,29 +1379,6 @@ def process_vk_event(data):
         event_id = data.get("event_id")
 
         if not user_id or not peer_id or int(peer_id) < 2000000000:
-            return Response("ok")
-
-        vote_text = text_after_bot_tag(text)
-        vote_text = text if vote_text is None else vote_text
-        vote_match = re.fullmatch(r"голос\s+([A-Za-z0-9_-]{1,40})\s+([1-8])", vote_text.strip(), re.IGNORECASE)
-        if vote_match:
-            if int(user_id) <= 0 or not command_event_once(event_id):
-                return Response("ok")
-            from quest_engine import quest_api
-            try:
-                result = quest_api('vote', questId=vote_match[1], choice=int(vote_match[2]),
-                    peerId=str(peer_id), vkId=str(user_id),
-                    messageId=int(msg.get('conversation_message_id') or msg.get('id') or 0))
-            except ValueError as exc:
-                vk_send(peer_id, '🗳 ' + str(exc))
-                return Response("ok")
-            except Exception:
-                app.logger.exception('Не удалось сохранить голос')
-                vk_send(peer_id, '🗳 Не удалось сохранить голос. Отправь команду новым сообщением чуть позже.')
-                return Response("ok")
-            if not result.get('duplicate'):
-                vk_send(peer_id, f"🗳 [id{user_id}|Голос] " +
-                    ('изменён' if result.get('changed') else 'принят') + f": вариант {result['choice']}.")
             return Response("ok")
 
         if SAVE_CHAT_MESSAGES:
@@ -1709,6 +1686,23 @@ def sync_participants_silent_route():
             "success": False,
             "error": str(exc),
         }), 500
+
+
+@app.post("/quest-poll-recover")
+def quest_poll_recover_route():
+    supplied = request.headers.get("X-Schedule-Secret", "").strip()
+    if not SCHEDULE_SECRET or not hmac.compare_digest(supplied, SCHEDULE_SECRET):
+        return jsonify(success=False, error='forbidden'), 403
+    from quest_engine import quest_api
+    from quest_polls import recover
+    try:
+        result = recover(request.get_json(silent=True) or {}, quest_api)
+        return jsonify(result), 200
+    except (KeyError, ValueError):
+        return jsonify(success=False, error='Проверьте ID квеста, этапа и параметры опроса'), 400
+    except Exception:
+        app.logger.exception('Не удалось восстановить привязку опроса')
+        return jsonify(success=False, error='Нужна проверка журнала Render'), 503
 
 
 @app.post("/quest-tick")
