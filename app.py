@@ -6,6 +6,7 @@ import math
 import time
 import json
 import hmac
+import hashlib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -548,7 +549,7 @@ def split_vk_message(text, limit=3900):
     return parts
 
 
-def vk_send(peer_id, text, attachment=None):
+def vk_send(peer_id, text, attachment=None, keyboard=None, random_id=None):
     chunks = split_vk_message(text)
     last_result = None
 
@@ -557,9 +558,13 @@ def vk_send(peer_id, text, attachment=None):
             "access_token": VK_TOKEN,
             "v": "5.199",
             "peer_id": peer_id,
-            "random_id": random.randint(1, 2147483647),
+            "random_id": random.randint(1, 2147483647) if random_id is None else (
+                int.from_bytes(hashlib.sha256(f"{random_id}:{index}".encode()).digest()[:4], "big")
+                & 0x7fffffff) or 1,
             "message": chunk,
         }
+        if keyboard is not None and index == 0:
+            data["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
         # Картинку прикрепляем только к первой части выпуска.
         if attachment and index == 0:
             data["attachment"] = attachment
@@ -1108,7 +1113,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 3,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1122,7 +1127,7 @@ def native_schedule():
         data = request.get_json(silent=True) or {}
         requested = data.get('jobs')
         if requested is not None and (not isinstance(requested, list) or not requested
-                or len(requested) > 3 or any(j not in ('evening', 'statistics', 'sync') for j in requested)):
+                or len(requested) > 3 or any(j not in ('evening', 'statistics', 'sync', 'quests') for j in requested)):
             return jsonify(success=False, error='Некорректный список заданий'), 400
         schedule = configured_schedule() if requested is None else []
         results = []
@@ -1132,6 +1137,8 @@ def native_schedule():
                 # Явный вызов не зависит от старого расписания и окна 18:00–18:30.
                 if job == 'evening' and requested is not None:
                     results.append(dict(job=job, **generate_scheduled_digest('evening')))
+                elif job == 'quests' and not os.environ.get('QUEST_SPREADSHEET_ID', '').strip():
+                    results.append(dict(success=True, job=job, skipped=True, reason='QUEST_SPREADSHEET_ID не задан'))
                 else:
                     results.append(run(job))
             except Exception:
@@ -1377,6 +1384,32 @@ def process_vk_event(data):
         event_id = data.get("event_id")
 
         if not user_id or not peer_id or int(peer_id) < 2000000000:
+            return Response("ok")
+
+        # Inline text-кнопки доставляются обычным message_new с JSON payload.
+        # Пользователь, чат и порядок берутся только из события VK.
+        from quest_votes import parse_payload
+        try:
+            selection = parse_payload(msg.get('payload'))
+        except ValueError:
+            return Response('ok')
+        if selection is not None:
+            if int(user_id) <= 0:
+                return Response("ok")
+            from quest_engine import quest_api
+            try:
+                result = quest_api('vote', **selection, peerId=str(peer_id), vkId=str(user_id),
+                    messageId=int(msg.get('conversation_message_id') or msg.get('id') or 0))
+            except ValueError as exc:
+                vk_send(peer_id, '🗳 ' + str(exc))
+                return Response("ok")
+            except Exception:
+                app.logger.exception('Не удалось сохранить голос')
+                vk_send(peer_id, '🗳 Не удалось сохранить голос. Нажми кнопку ещё раз чуть позже.')
+                return Response("ok")
+            if not result.get('duplicate'):
+                vk_send(peer_id, f"🗳 [id{user_id}|Голос] " +
+                    ('изменён' if result.get('changed') else 'принят') + f": вариант {result['choice']}.")
             return Response("ok")
 
         if SAVE_CHAT_MESSAGES:

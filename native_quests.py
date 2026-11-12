@@ -29,6 +29,9 @@ def table(api, book, name):
 
 def quest_action(api, book, action, data):
     """Вызывается под одной блокировкой книги; переход и исходящие — один batch."""
+    if action == "vote":
+        from quest_votes import vote
+        return vote(api, book, data)
     tabs = api.tabs(book)
     writes = []
     timestamp = now_iso()
@@ -109,7 +112,7 @@ def quest_action(api, book, action, data):
             append(tabs['Исходящие']['sheetId'], [event_id, quest['quest_id'], stage_id,
                 quest['peer_id'], text, 'pending', timestamp, '']),
             append(tabs['Журнал']['sheetId'], [event_id, quest['quest_id'], stage_id, kind, timestamp, ''])])
-        new_outbox.append({'event_id': event_id, 'peer_id': quest['peer_id'],
+        new_outbox.append({'event_id': event_id, 'quest_id': quest['quest_id'], 'stage_id': stage_id, 'peer_id': quest['peer_id'],
                           'текст': text, 'статус': 'pending'})
     for quest in quests:
         if quest.get('статус') not in ('active', 'running'):
@@ -118,6 +121,37 @@ def quest_action(api, book, action, data):
                       and s.get('stage_id') == quest.get('текущий_этап')), None)
         if not stage:
             raise ValueError('Этап квеста отсутствует')
+        if stage.get('тип') == 'vote':
+            from quest_votes import options, announcement, deadline as vote_deadline, tally
+            choices = options(stage, stages)
+            if quest['статус'] == 'active':
+                if f"{quest['quest_id']}:{stage['stage_id']}:vote_result" in emitted:
+                    raise ValueError('Этот этап голосования уже завершён. Используйте новый quest_id или stage_id')
+                if datetime.now(timezone.utc) >= vote_deadline(stage):
+                    raise ValueError('Нельзя открыть голосование с прошедшим дедлайном')
+                transitions.append({'quest': quest['quest_id'], 'kind': 'vote_open'})
+                if not dry:
+                    event(quest, stage['stage_id'], 'vote_open', announcement(quest, stage, choices))
+                    writes.append(update(tabs['Квесты']['sheetId'], quest['_row'], 2, ['running']))
+                continue
+            if datetime.now(timezone.utc) < vote_deadline(stage):
+                continue
+            announced = any(r.get('quest_id') == quest['quest_id'] and r.get('stage_id') == stage['stage_id']
+                            and not r.get('event_id', '').endswith(':vote_result')
+                            and r.get('статус') == 'sent' for r in outbox)
+            if not announced:
+                raise RuntimeError('Голосование не было подтверждено как отправленное до дедлайна; ветка не выбрана')
+            target_id, summary = tally(api, book, quest, stage, choices)
+            target = next(s for s in stages if s['quest_id'] == quest['quest_id'] and s['stage_id'] == target_id)
+            transitions.append({'quest': quest['quest_id'], 'kind': 'vote_result', 'to': target_id})
+            if not dry:
+                text = summary + '\n\n' + target['текст']
+                if target.get('тип') == 'vote':
+                    raise ValueError('Между голосованиями нужен отдельный этап, чтобы исключить повтор голосов')
+                event(quest, stage['stage_id'], 'vote_result', text)
+                status = 'finished' if target.get('тип') == 'finish' else 'running'
+                writes.append(update(tabs['Квесты']['sheetId'], quest['_row'], 2, [status, target_id]))
+            continue
         if quest['статус'] == 'active':
             if stage.get('тип') == 'start':
                 transitions.append({'quest': quest['quest_id'], 'kind': 'start'})
@@ -144,13 +178,33 @@ def quest_action(api, book, action, data):
         transitions.append({'quest': quest['quest_id'], 'from': stage['stage_id'],
                             'to': target_id, 'success': success})
         if not dry:
-            event(quest, target_id, 'success' if success else 'failure', target['текст'])
-            writes.append(update(tabs['Квесты']['sheetId'], quest['_row'], 2, ['finished', target_id]))
+            text = target['текст']
+            if target.get('тип') == 'vote':
+                from quest_votes import options, announcement, deadline as vote_deadline
+                choices = options(target, stages)
+                if f"{quest['quest_id']}:{target_id}:vote_result" in emitted:
+                    raise ValueError('Нельзя повторно открыть завершённое голосование; используйте новый stage_id')
+                if datetime.now(timezone.utc) >= vote_deadline(target):
+                    raise ValueError('Дедлайн следующего голосования уже прошёл')
+                text = announcement(quest, target, choices)
+            event(quest, target_id, 'success' if success else 'failure', text)
+            status = 'finished' if target.get('тип') == 'finish' else 'running'
+            writes.append(update(tabs['Квесты']['sheetId'], quest['_row'], 2, [status, target_id]))
     if writes:
         api.batch(book, writes)
-    return {'success': True, 'transitions': transitions, 'outbox': [
-        {'eventId': r['event_id'], 'peerId': r['peer_id'], 'text': r['текст']}
-        for r in outbox + new_outbox if r.get('статус') == 'pending']}
+    outgoing = []
+    for row in outbox + new_outbox:
+        if row.get('статус') != 'pending':
+            continue
+        item = dict(eventId=row['event_id'], peerId=row['peer_id'], text=row['текст'])
+        source = next((s for s in stages if s['quest_id'] == row.get('quest_id')
+                       and s['stage_id'] == row.get('stage_id')), None)
+        if source and source.get('тип') == 'vote' and not row['event_id'].endswith(':vote_result'):
+            from quest_votes import options, keyboard
+            owner = next(q for q in quests if q['quest_id'] == source['quest_id'])
+            item['keyboard'] = keyboard(owner, source, options(source, stages))
+        outgoing.append(item)
+    return {'success': True, 'transitions': transitions, 'outbox': outgoing}
 
 
 def dispatch(action, **data):
