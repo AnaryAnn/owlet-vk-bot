@@ -155,7 +155,8 @@ class Publisher:
                 return True
             phase = state.get('phase', 'closed')
             expired = False
-            if phase in ('awaiting', 'preview') and self.now() > state.get('expires', 0):
+            received = min(self.now(), float(message.get('date') or self.now()))
+            if phase in ('awaiting', 'preview') and received > state.get('expires', 0):
                 state = {'phase': 'closed', 'last_cid': state.get('last_cid', 0)}
                 phase = 'closed'
                 expired = True
