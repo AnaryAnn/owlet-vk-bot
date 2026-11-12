@@ -207,10 +207,14 @@ def save_report(api, name, plan, fact, report_id):
             'artifactEligible': fact > previous_fact, 'changed': bool(changed),
             'artifactStatus': 'pending' if fact > previous_fact else 'skipped',
             'notificationStatus': 'pending' if changed else 'skipped'}
+        from daily_tasks import report_update
+        daily_writes, daily_status = report_update(api, name, vk_id, week, fact, tabs=tabs)
+        if daily_status is not None:
+            result['dailyTask'] = daily_status
         journal_row = len(journal) + 1
         # Строка отчёта и защита от повтора — одна атомарная запись Google.
         api.batch(SHEET_ID, [update(tabs[title]['sheetId'], index, 1, [plan, fact, stamp()]),
-            append(journal_id, [report_id, digest, json.dumps(result, ensure_ascii=False)])])
+            append(journal_id, [report_id, digest, json.dumps(result, ensure_ascii=False)])] + daily_writes)
         return result, journal_id, journal_row
 
 
@@ -218,7 +222,7 @@ RARITIES = [('обычный', 65, '⚪'), ('необычный', 22, '🟢'),
             ('редкий', 9, '🔵'), ('эпический', 3, '🟣'), ('легендарный', 1, '🟡')]
 
 
-def artifact_drop(api, report, rng=None):
+def artifact_drop(api, report, rng=None, guaranteed=False):
     rng = rng or random.SystemRandom()
     with api.locked(ARTIFACTS_ID):
         log_id = api.ensure_tab(ARTIFACTS_ID, '_ArtifactDrops',
@@ -227,7 +231,7 @@ def artifact_drop(api, report, rng=None):
         for row in logs:
             if row and row[0] == report['requestId']:
                 return json.loads(row[7])
-        chance = .20 if report['fact'] >= report['plan'] else .10
+        chance = 1.0 if guaranteed else (.20 if report['fact'] >= report['plan'] else .10)
         result = {'success': True, 'attempted': True, 'dropped': False, 'chance': chance}
         writes = []
         if rng.random() < chance:
@@ -241,6 +245,20 @@ def artifact_drop(api, report, rng=None):
             catalog = api.values(ARTIFACTS_ID, ["'Артефакты'!A2:E"])[0]
             choices = [r for r in catalog if len(r) >= 3 and str(r[0]).strip() and str(r[2]).strip()
                 and str(r[1]).strip().lower().replace('ё', 'е') == selected[0]]
+            if not choices and guaranteed:
+                available = [item for item in RARITIES if any(len(r) >= 3 and str(r[0]).strip() and str(r[2]).strip()
+                    and str(r[1]).strip().lower().replace('ё', 'е') == item[0] for r in catalog)]
+                if not available:
+                    raise ValueError('Каталог артефактов пуст; гарантированная награда остаётся в очереди')
+                roll = rng.random() * sum(item[1] for item in available)
+                selected = available[-1]
+                for item in available:
+                    roll -= item[1]
+                    if roll < 0:
+                        selected = item
+                        break
+                choices = [r for r in catalog if len(r) >= 3 and str(r[0]).strip() and str(r[2]).strip()
+                    and str(r[1]).strip().lower().replace('ё', 'е') == selected[0]]
             if not choices:
                 result['error'] = 'Нет артефактов выбранной редкости'
                 api.batch(ARTIFACTS_ID, [append(log_id, [report['requestId'], stamp(),
@@ -321,4 +339,7 @@ def submit_report(data):
         except (Busy, Conflict, Uncertain, requests.RequestException, ValueError, KeyError):
             # Запись уже сохранена. Клиент может повторить тот же requestId.
             report['warning'] = 'Данные сохранены. Артефакт или уведомление ещё не подтверждены; повторите запрос.'
+        if report.get('dailyTask'):
+            from daily_tasks import safe_pending
+            safe_pending(report['vkId'])
         return report

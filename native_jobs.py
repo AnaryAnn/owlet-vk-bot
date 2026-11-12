@@ -14,7 +14,7 @@ from sheets_api import _session, SHEET_ID, TIMEZONE
 from website_store import Sheets, append, update, stamp
 from native_storage import enabled
 
-JOBS = ('morning', 'evening', 'statistics', 'sync', 'quests', 'cleanup')
+JOBS = ('morning', 'evening', 'statistics', 'sync', 'quests', 'cleanup', 'daily')
 
 
 def configured_schedule():
@@ -71,6 +71,9 @@ def run(job, dry_run=False):
     elif job == 'statistics': result = app.generate_scheduled_stats()
     elif job == 'sync': result = app.sync_chat_participants(app.STATS_PEER_ID)
     elif job == 'quests': result = app.quest_tick(app.google_get, app.vk_send, app.STATS_PEER_ID)
+    elif job == 'daily':
+        from daily_tasks import sweep
+        result = sweep()
     else: result = app.digest_post({'action': 'cleanup', 'hours': 24})
     if isinstance(result, dict) and result.get('success') is False:
         raise RuntimeError('Задание не подтвердило успех')

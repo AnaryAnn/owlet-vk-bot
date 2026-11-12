@@ -1113,7 +1113,7 @@ def generate_stats_background(peer_id):
 
 @app.get("/")
 def health():
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "questLockRetryVersion": 1,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "dailyTasksVersion": 1, "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
 
@@ -1127,7 +1127,7 @@ def native_schedule():
         data = request.get_json(silent=True) or {}
         requested = data.get('jobs')
         if requested is not None and (not isinstance(requested, list) or not requested
-                or len(requested) > 3 or any(j not in ('evening', 'statistics', 'sync', 'quests') for j in requested)):
+                or len(requested) > 3 or any(j not in ('evening', 'statistics', 'sync', 'quests', 'daily') for j in requested)):
             return jsonify(success=False, error='Некорректный список заданий'), 400
         schedule = configured_schedule() if requested is None else []
         results = []
@@ -1414,6 +1414,31 @@ def process_quest_vote_callback(event):
     vote_feedback(user_id, peer_id, event_id, text)
 
 
+def process_daily_callback(event):
+    from daily_tasks import transact, request as task_request, safe_pending
+    try:
+        user_id, peer_id = int(event.get('user_id') or 0), int(event.get('peer_id') or 0)
+        event_id = event.get('event_id')
+        payload = event.get('payload') or {}
+        if user_id <= 0 or peer_id != user_id or not isinstance(event_id, str) or not event_id:
+            return
+        if (payload.get('level') not in ('easy', 'normal', 'heroic')
+                or not isinstance(payload.get('offer'), str) or len(payload['offer']) != 32):
+            return
+    except (ValueError, TypeError):
+        return
+    try:
+        result = transact(task_request, vk_id=str(user_id), level=payload['level'], offer=payload['offer'])
+        text = result['text']
+    except ValueError as exc:
+        text = str(exc)
+    except Exception:
+        app.logger.exception('Не удалось выдать личное задание')
+        text = 'Задание пока не выдано. Напиши «Задание» чуть позже.'
+    vote_feedback(user_id, peer_id, event_id, text)
+    safe_pending(str(user_id))
+
+
 def process_vk_event(data):
     """Обработка события вне HTTP-запроса VK."""
     try:
@@ -1424,7 +1449,12 @@ def process_vk_event(data):
         if str(data.get("group_id","")) != VK_GROUP_ID:
             return Response("ok")
         if data.get("type") == "message_event":
-            process_quest_vote_callback(data.get("object") or {})
+            event = data.get("object") or {}
+            payload = event.get("payload")
+            if isinstance(payload, dict) and payload.get("kind") == "daily_task":
+                process_daily_callback(event)
+                return Response("ok")
+            process_quest_vote_callback(event)
             return Response("ok")
 
         msg = ((data.get("object") or {}).get("message") or {})
@@ -1433,7 +1463,20 @@ def process_vk_event(data):
         text = (msg.get("text") or "").strip()
         event_id = data.get("event_id")
 
-        if not user_id or not peer_id or int(peer_id) < 2000000000:
+        if not user_id or not peer_id:
+            return Response("ok")
+        if int(peer_id) < 2000000000:
+            if int(user_id) > 0 and int(peer_id) == int(user_id) and text.casefold() == 'задание':
+                from daily_tasks import transact, request as task_request, safe_pending
+                try:
+                    result = transact(task_request, vk_id=str(user_id))
+                    vk_send(user_id, result['text'], keyboard=result.get('keyboard'), random_id='daily-menu:'+str(event_id))
+                    safe_pending(str(user_id))
+                except ValueError as exc:
+                    vk_send(user_id, str(exc))
+                except Exception:
+                    app.logger.exception('Не удалось открыть личное задание')
+                    vk_send(user_id, 'Не удалось получить задание. Напиши «Задание» чуть позже.')
             return Response("ok")
 
         # Inline text-кнопки доставляются обычным message_new с JSON payload.
