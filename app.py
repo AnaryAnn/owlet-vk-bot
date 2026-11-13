@@ -735,7 +735,12 @@ def send_report_confirmation_background(
                 description = str(artifact.get("description") or "").strip()
                 vk_photo = str(artifact.get("vkPhoto") or "").strip()
 
+                recipient_name = str(name or "Участник").replace("|", " ").replace("]", "").replace("[", "")
+                recipient = (f"[id{vk_id}|{recipient_name}]"
+                             if str(vk_id).isdigit() else recipient_name)
                 artifact_lines = [
+                    f"🎁 Получатель: {recipient}",
+                    "",
                     intro,
                     "",
                     f"{emoji} {label}".strip(),
