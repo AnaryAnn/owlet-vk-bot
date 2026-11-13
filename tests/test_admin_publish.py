@@ -27,6 +27,23 @@ class Drafts:
             yield Transaction()
 
 
+class OwnerLockTests(unittest.TestCase):
+    def test_verified_owner_does_not_wait_on_initialization_lock(self):
+        guard = Mock()
+        guard.__enter__ = Mock(side_effect=AssertionError('stale lock'))
+        with patch.object(pub, '_owner', 54341305), patch.object(pub, '_owner_guard', guard):
+            self.assertEqual(pub.resolve_owner(), 54341305)
+
+    def test_child_resets_inherited_locked_guard(self):
+        guard = threading.Lock()
+        guard.acquire()
+        with patch.object(pub, '_owner_guard', guard):
+            pub._reset_owner_guard_after_fork()
+            self.assertIsNot(pub._owner_guard, guard)
+            self.assertTrue(pub._owner_guard.acquire(blocking=False))
+            pub._owner_guard.release()
+
+
 class PublisherTests(unittest.TestCase):
     def setUp(self):
         self.store, self.send = Drafts(), Mock(return_value={'response': 123})

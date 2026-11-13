@@ -22,12 +22,25 @@ _owner = None
 _owner_guard = threading.Lock()
 
 
+def _reset_owner_guard_after_fork():
+    global _owner_guard
+    _owner_guard = threading.Lock()
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_reset_owner_guard_after_fork)
+
+
 def normalized(text):
     return ' '.join(re.findall(r'[а-яa-z0-9]+', str(text).casefold().replace('ё', 'е')))
 
 
 def resolve_owner():
     global _owner
+    # A verified identity is immutable for this process. Never wait on a stale
+    # inherited initialization lock to use an already verified owner.
+    if _owner is not None:
+        return _owner
     with _owner_guard:
         if _owner is None:
             with _session() as session:
