@@ -698,7 +698,7 @@ def send_report_confirmation_background(
     peer_id, vk_id, name, plan, fact, report_id, artifact_eligible=False
 ):
     """
-    Формирует одно сообщение подтверждения.
+    Сразу подтверждает сохранение; награда отправляется отдельно.
     Отчёт к этому моменту уже сохранён. Если факт вырос, здесь в фоне
     выполняется бросок артефакта через нативный адаптер.
     """
@@ -711,7 +711,12 @@ def send_report_confirmation_background(
         f"🦉 Данные сохранены!\n{name}: "
         f"план {plan} 🐭, факт {fact} 🐭"
     )
+    message = append_overplan_comment(message, plan, fact, report_id)
+    report_diag(report_id, "vk_send_start", started, has_attachment=False)
+    vk_send_reliable(peer_id, message, attempts=6)
+    report_diag(report_id, "vk_send_done", started)
     attachment = None
+
 
     if artifact_eligible and report_id:
         try:
@@ -738,24 +743,17 @@ def send_report_confirmation_background(
                 ]
                 if description:
                     artifact_lines += ["", f"«{description}»"]
-                message += "\n\n" + "\n".join(artifact_lines)
+                message = "\n".join(artifact_lines)
 
                 if re.fullmatch(
                     r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE
                 ):
                     attachment = vk_photo.lower()
+                vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
         except Exception as exc:
             # Артефакт не должен задерживать или ломать подтверждение отчёта.
             print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
 
-    message = append_overplan_comment(message, plan, fact, report_id)
-    report_diag(report_id, "vk_send_start", started, has_attachment=bool(attachment))
-    send_t0 = time.monotonic()
-    vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
-    report_diag(
-        report_id, "vk_send_done", started,
-        send_seconds=round(time.monotonic() - send_t0, 3)
-    )
 
 def vk_get_chat_members(peer_id):
     """Получает актуальных пользователей беседы VK. Ничего не меняет."""

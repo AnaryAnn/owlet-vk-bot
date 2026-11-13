@@ -31,10 +31,22 @@ class ReportCommentTests(unittest.TestCase):
         'dropped': True, 'artifact': {'name': 'Перо', 'description': 'Описание', 'vkPhoto': 'photo-1_2'}})
     def test_vk_comment_after_artifact(self, roll, send):
         app.send_report_confirmation_background(2000000002, '123', 'Тест', 30, 31, 'r', True)
-        message = send.call_args.args[1]
-        self.assertTrue(any(message.endswith(c) for c in OVERPLAN_COMMENTS))
-        self.assertLess(message.index('Описание'), len(message.rsplit('\n\n', 1)[0]))
+        self.assertEqual(send.call_count, 2)
+        confirmation = send.call_args_list[0].args[1]
+        self.assertIn('Данные сохранены', confirmation)
+        self.assertTrue(any(confirmation.endswith(c) for c in OVERPLAN_COMMENTS))
+        self.assertIn('Описание', send.call_args.args[1])
         self.assertEqual(send.call_args.kwargs['attachment'], 'photo-1_2')
+
+    @patch.object(app, 'vk_send_reliable')
+    def test_confirmation_precedes_failed_artifact(self, send):
+        def fail(*args):
+            self.assertEqual(send.call_count, 1)
+            self.assertIn('Данные сохранены', send.call_args.args[1])
+            raise TimeoutError('artifact unavailable')
+        with patch.object(app, 'roll_artifact_direct', side_effect=fail):
+            app.send_report_confirmation_background(2000000002, '123', 'Тест', 10, 6, 'r', True)
+        self.assertEqual(send.call_count, 1)
 
     @patch.object(website_store.requests, 'post')
     def test_site_comment_after_artifact_and_same_payload_on_retry(self, post):

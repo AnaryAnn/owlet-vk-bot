@@ -5,11 +5,12 @@ import os
 import re
 import time
 import logging
+import netrc  # Load stdlib before Google auth starts background refresh threads.
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from google.auth.transport.requests import AuthorizedSession
+from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2 import service_account
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -92,6 +93,22 @@ def read_response(session, url, params=None, timeout=25):
         time.sleep(.3)
 
 
+class SheetsSession(AuthorizedSession):
+    """Explicit service-account auth; never consult ambient netrc credentials."""
+    def __init__(self, credentials):
+        self._owned_auth_session = requests.Session()
+        self._owned_auth_session.trust_env = False
+        super().__init__(credentials, auth_request=Request(self._owned_auth_session),
+                         refresh_timeout=20)
+        self.trust_env = False
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            self._owned_auth_session.close()
+
+
 def _session(write=False):
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not raw:
@@ -99,7 +116,7 @@ def _session(write=False):
     info = json.loads(raw)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"] if write else SCOPES
     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    return AuthorizedSession(creds)
+    return SheetsSession(creds)
 
 
 def read_value_ranges(session, book, ranges, formatted=False, timeout=25):
