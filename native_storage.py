@@ -159,6 +159,14 @@ def sync_members(api, incoming, sync_id):
 
 def stats_post(data):
     enabled(); action = data.get('action')
+    if action == 'checkEvent':
+        # A read-only duplicate check must not compete with saving reports.
+        with _session() as session:
+            api = Sheets(session)
+            if 'EventLog' not in api.tabs(SHEET_ID):
+                return dict(success=True, exists=False)
+            rows = api.values(SHEET_ID, ["'EventLog'!A2:D"])[0]
+            return dict(success=True, exists=any(r and str(r[0]) == str(data.get('eventId') or '') for r in rows))
     if action == 'vkSave':
         person = stats_get({'action': 'vkUser', 'vkId': str(data.get('vkId', ''))})
         if not person.get('name'): return dict(success=False, unknownVkUser=True, vkId=str(data.get('vkId', '')))
@@ -173,7 +181,7 @@ def stats_post(data):
     with _session(write=True) as session:
         api = Sheets(session)
         with api.locked(SHEET_ID):
-            if action in ('checkEvent', 'markEventProcessed'):
+            if action == 'markEventProcessed':
                 event = str(data.get('eventId') or '')
                 log = api.ensure_tab(SHEET_ID, 'EventLog', ['event_id', 'timestamp', 'vk_id', 'peer_id'])
                 rows = api.values(SHEET_ID, ["'EventLog'!A2:D"])[0]

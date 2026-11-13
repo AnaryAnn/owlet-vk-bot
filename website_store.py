@@ -10,6 +10,7 @@ import os
 import random
 import re
 import time
+import threading
 import uuid
 from urllib.parse import quote
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ STATS_LOCK_ID = 1937152402
 STATS_LOCK_KEY = 'owlet_stats_write_v2'
 STATS_LOCK_BOOK = os.environ.get('STATS_LOCK_SPREADSHEET_ID') or os.environ.get('QUEST_SPREADSHEET_ID') or ARTIFACTS_ID
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
+_STATS_WRITERS = threading.RLock()
 
 
 class Busy(Exception):
@@ -212,6 +214,18 @@ class Sheets:
 
     @contextmanager
     def locked(self, book):
+        if book == SHEET_ID:
+            # A single worker can receive many report threads at once. Queue
+            # locally instead of making them collide at the remote mutex.
+            with _STATS_WRITERS:
+                with self._locked_remote(book):
+                    yield
+        else:
+            with self._locked_remote(book):
+                yield
+
+    @contextmanager
+    def _locked_remote(self, book):
         lock_id, lock_key = LOCK_ID, LOCK_KEY
         if book == SHEET_ID:
             book = STATS_LOCK_BOOK
@@ -245,9 +259,20 @@ class Sheets:
         finally:
             # При потере ответа Google замок остаётся; нельзя пропускать новую запись.
             if not self.uncertain:
-                self.batch(book, [{'deleteDeveloperMetadata': {'dataFilter': {
+                release = [{'deleteDeveloperMetadata': {'dataFilter': {
                     'developerMetadataLookup': {'metadataId': lock_id,
-                        'metadataKey': lock_key, 'metadataValue': owner}}}}])
+                        'metadataKey': lock_key, 'metadataValue': owner}}}}]
+                # Retrying this owner-qualified deletion cannot remove a later
+                # writer's lock, even if Google applies a delayed first delete.
+                for attempt in range(3):
+                    try:
+                        self.batch(book, release)
+                        self.uncertain = False
+                        break
+                    except Uncertain:
+                        if attempt == 2:
+                            raise
+                        time.sleep(.2 * (2 ** attempt))
 
 
 def stamp():
