@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 import requests
+from sheets_api import grid_ranges, bounds  # Initialize pure helpers before any worker threads.
 from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
 from quest_milestones import send_milestones
@@ -1114,7 +1115,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 3, "adminPublisherVersion": 4,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 4, "adminPublisherVersion": 4,
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
@@ -1812,6 +1813,8 @@ def quest_tick_route():
 
 
 if os.environ.get('RENDER') == 'true':
+    from stats_recovery import audit as audit_stats
+    threading.Thread(target=audit_stats, daemon=True, name='stats-recovery-audit').start()
     from admin_publish import prepare as prepare_admin_publish
     threading.Thread(target=prepare_admin_publish, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 

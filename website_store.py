@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from report_comments import append_overplan_comment
-from sheets_api import _session, _quote, _number, current_week, SHEET_ID, TIMEZONE, read_response
+from sheets_api import bounds, _session, _quote, _number, current_week, SHEET_ID, TIMEZONE, read_response
 
 ARTIFACTS_ID = os.environ.get('ARTIFACTS_SPREADSHEET_ID',
     '1xpcRGO2i2nw6TAik3NskITxwAM6e7831LaSigDR3sRk')
@@ -162,7 +162,6 @@ class Sheets:
                     '/values/' + quote(f'{_quote(title)}!A{anchor}:{column(width-1)}{anchor}', safe='') + ':append',
                     {'values': [['reserved-' + uuid.uuid4().hex] for _ in rows]},
                     {'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'})
-                from sheets_grid import bounds
                 _, row_index, _, _, _ = bounds(reserved['updates']['updatedRange'])
                 if row_index != len(existing):
                     self.uncertain = True
