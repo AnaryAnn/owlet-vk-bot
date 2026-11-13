@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from uuid import uuid4
 import requests
 from sheets_api import grid_ranges, bounds  # Initialize pure helpers before any worker threads.
+import stats_startup
 from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
 from quest_milestones import send_milestones
@@ -1811,8 +1812,7 @@ def quest_tick_route():
 
 
 if os.environ.get('RENDER') == 'true':
-    from stats_recovery import audit as audit_stats
-    threading.Thread(target=audit_stats, args=(app,), daemon=True, name='stats-recovery-audit').start()
+    threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     from admin_publish import prepare as prepare_admin_publish
     threading.Thread(target=prepare_admin_publish, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
