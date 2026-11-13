@@ -21,6 +21,7 @@ from report_comments import append_overplan_comment
 from report_trace import ReportTrace
 import native_storage
 import quest_votes  # Callback dependencies are initialized before any worker starts.
+import admin_publish  # Initialize private-message handlers before worker threads.
 
 app = Flask(__name__)
 from website_api import website_api
@@ -1436,8 +1437,7 @@ def process_vk_event(data):
         if data.get("type") == "message_event":
             event = data.get('object') or {}
             if 0 < int(event.get('peer_id') or 0) < 2000000000:
-                from admin_publish import handle_callback
-                handle_callback(event, vk_send, VK_TOKEN)
+                admin_publish.handle_callback(event, vk_send, VK_TOKEN)
             else:
                 process_quest_vote_callback(event)
             return Response("ok")
@@ -1452,8 +1452,10 @@ def process_vk_event(data):
             trace = ReportTrace(event_id)
 
         if peer_id and 0 < int(peer_id) < 2000000000:
-            from admin_publish import handle_message
-            handle_message(msg, vk_send, VK_TOKEN)
+            trace = ReportTrace(event_id)
+            trace.step('private_handler_start')
+            admin_publish.handle_message(msg, vk_send, VK_TOKEN)
+            trace.step('private_handler_done')
             return Response('ok')
 
         if not user_id or not peer_id or int(peer_id) < 2000000000:
@@ -1832,8 +1834,7 @@ def quest_tick_route():
 
 if os.environ.get('RENDER') == 'true':
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
-    from admin_publish import prepare as prepare_admin_publish
-    threading.Thread(target=prepare_admin_publish, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
+    threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
