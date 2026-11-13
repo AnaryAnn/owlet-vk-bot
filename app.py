@@ -5,6 +5,7 @@ import threading
 import math
 import time
 import json
+import sys
 import hmac
 import hashlib
 from datetime import datetime, timedelta
@@ -17,6 +18,9 @@ from flask import Flask, request, Response, jsonify
 from quest_engine import tick as quest_tick
 from quest_milestones import send_milestones
 from report_comments import append_overplan_comment
+from report_trace import ReportTrace
+import native_storage
+import quest_votes  # Callback dependencies are initialized before any worker starts.
 
 app = Flask(__name__)
 from website_api import website_api
@@ -46,7 +50,7 @@ EVENING_PHOTO = os.environ.get("EVENING_PHOTO", "photo-241605282_457239023").str
 SCHEDULE_SECRET = os.environ.get("SCHEDULE_SECRET", "").strip()
 
 PAIR_RE = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
-PLAIN_REPORT_RE = re.compile(r"^\s*робосычик\s+(\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
+PLAIN_REPORT_RE = re.compile(r"^\s*@?робосычик\s+(\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
 
 _COMMAND_EVENT_LOCK = threading.Lock()
 _COMMAND_EVENT_IDS = {}
@@ -76,13 +80,11 @@ def command_event_once(event_id):
 
 
 def google_post(payload):
-    from native_storage import stats_post
-    return stats_post(payload)
+    return native_storage.stats_post(payload)
 
 
 def google_get(params=None):
-    from native_storage import stats_get
-    return stats_get(params)
+    return native_storage.stats_get(params)
 
 
 def _num(value):
@@ -1116,7 +1118,7 @@ def generate_stats_background(peer_id):
 @app.get("/")
 def health():
     from sheets_api import SHEET_ID
-    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 5, "adminPublisherVersion": 4,
+    return {"ok":True, "service":"sychnaya-ohota-native-sheets-v1", "schedulerVersion": 2, "questVotingVersion": 4, "reportRecoveryVersion": 5, "adminPublisherVersion": 4, "reportPipelineVersion": 1, "pythonVersion": sys.version.split()[0],
             "statsSpreadsheetMatchesExpected": SHEET_ID == "1S1tcMNZj84rLAQi_zPrPT-yxP0b6OYXHpo-JLbbbH60", "questLockRetryVersion": 1,
             "nativeEnabled":os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true'}
 
@@ -1420,6 +1422,7 @@ def process_quest_vote_callback(event):
 
 def process_vk_event(data):
     """Обработка события вне HTTP-запроса VK."""
+    trace = None
     try:
         if data.get("type") == "confirmation":
             return Response(VK_CONFIRMATION_CODE, mimetype="text/plain")
@@ -1441,6 +1444,9 @@ def process_vk_event(data):
         peer_id = msg.get("peer_id")
         text = (msg.get("text") or "").strip()
         event_id = data.get("event_id")
+        candidate = text_after_bot_tag(text)
+        if PLAIN_REPORT_RE.match(text) or (candidate is not None and PAIR_RE.match(candidate)):
+            trace = ReportTrace(event_id)
 
         if peer_id and 0 < int(peer_id) < 2000000000:
             from admin_publish import handle_message
@@ -1488,14 +1494,19 @@ def process_vk_event(data):
         # Первое число = план, второе = факт.
         plain_report = PLAIN_REPORT_RE.match(text)
         if plain_report:
+            if trace: trace.step('dedup_start')
             if not command_event_once(event_id):
+                if trace: trace.step('duplicate')
                 return Response("ok")
+            if trace: trace.step('dedup_done')
 
             plan, fact = map(int, plain_report.groups())
             report_id = f"vk-{event_id}"
+            if trace: trace.step('save_start')
             result = google_save_report(
                 user_id, plan, fact, report_id, attempts=3
             )
+            if trace: trace.step('save_done')
 
             if result.get("unknownVkUser"):
                 profile = vk_get_user(user_id)
@@ -1654,6 +1665,9 @@ def process_vk_event(data):
     except Exception as e:
         print("VK EVENT PROCESSING FAILED:", repr(e), "event_id=", data.get("event_id"), flush=True)
         return Response("ok")
+    finally:
+        if trace:
+            trace.close()
 
 
 @app.post("/vk")
@@ -1729,11 +1743,13 @@ def send_owlet_message_route():
 
 
 def google_save_report(vk_id, plan, fact, report_id, attempts=3):
+    report_diag(report_id, 'save_enter')
     from website_store import Busy
     payload = {"action": "vkSave", "vkId": str(vk_id), "plan": int(plan),
                "fact": int(fact), "reportId": str(report_id)}
     for attempt in range(max(1, int(attempts))):
         try:
+            report_diag(report_id, 'native_call_start', attempt=attempt)
             return google_post(payload)
         except Busy:
             if attempt + 1 < max(1, int(attempts)):

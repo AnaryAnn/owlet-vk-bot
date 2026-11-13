@@ -5,6 +5,7 @@ import math
 import os
 import random
 import time
+import logging
 from datetime import date, timedelta
 
 from sheets_api import _session, _quote, _number, current_week, SHEET_ID
@@ -168,15 +169,19 @@ def stats_post(data):
             rows = api.values(SHEET_ID, ["'EventLog'!A2:D"])[0]
             return dict(success=True, exists=any(r and str(r[0]) == str(data.get('eventId') or '') for r in rows))
     if action == 'vkSave':
+        logging.warning('REPORT_NATIVE report_id=%s stage=person_start', data.get('reportId'))
         person = stats_get({'action': 'vkUser', 'vkId': str(data.get('vkId', ''))})
+        logging.warning('REPORT_NATIVE report_id=%s stage=person_done found=%s', data.get('reportId'), bool(person.get('name')))
         if not person.get('name'): return dict(success=False, unknownVkUser=True, vkId=str(data.get('vkId', '')))
         from website_store import payload_values
         values = payload_values(dict(name=person['name'], plan=data.get('plan'), fact=data.get('fact'),
             requestId=hashlib.sha256(str(data.get('reportId', '')).encode()).hexdigest()))
         if not data.get('reportId'): raise ValueError('Нужен reportId')
         with _session(write=True) as session:
+            logging.warning('REPORT_NATIVE report_id=%s stage=write_session_ready', data.get('reportId'))
             api = Sheets(session)
             result, _, _ = save_report(api, values[0], values[1], values[2], str(data['reportId']))
+        logging.warning('REPORT_NATIVE report_id=%s stage=committed', data.get('reportId'))
         return dict(result, reportId=str(data['reportId']))
     with _session(write=True) as session:
         api = Sheets(session)
