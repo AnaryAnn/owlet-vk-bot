@@ -11,6 +11,8 @@ import hashlib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from uuid import uuid4
+import bounded_dns
+bounded_dns.install()
 import requests
 from sheets_api import grid_ranges, bounds  # Initialize pure helpers before any worker threads.
 import stats_startup
