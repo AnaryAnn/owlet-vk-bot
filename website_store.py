@@ -119,10 +119,10 @@ class Sheets:
         return r.json()
 
     def _literal_batch(self, book, requests_list):
-        """Reserve append capacity, then commit data and its journal atomically.
+        """Allocate empty capacity, then commit data and its journal atomically.
 
-        A reservation contains no report ID or success result. A failed commit
-        therefore cannot be mistaken for a saved report on a retry.
+        The caller holds the statistics lock. Never use values.append here:
+        Google's logical-table detection can choose a different row/column.
         """
         def column(index):
             result = ''
@@ -150,6 +150,21 @@ class Sheets:
             prepared.append((operation, rows, 'appendCells' in request))
         tabs = {p['sheetId']: title for title, p in self.tabs(book).items()}
         data = []
+        next_rows = {}
+        required_rows = {}
+        capacities = {}
+        if any(is_append for _, _, is_append in prepared):
+            grids = self.get(book, fields='sheets(properties(sheetId,gridProperties(rowCount,columnCount)))')
+            properties = {s['properties']['sheetId']: s['properties']['gridProperties']
+                          for s in grids.get('sheets', [])}
+            capacities = {sid: props['rowCount'] for sid, props in properties.items()}
+            for operation, _, is_append in prepared:
+                if is_append:
+                    sid = operation['sheetId']
+                    title = tabs[sid]
+                    if title not in next_rows:
+                        existing = self.values(book, [f"{_quote(title)}!A:{column(properties[sid]['columnCount'] - 1)}"])[0]
+                        next_rows[title] = len(existing)
         for operation, rows, is_append in prepared:
             start = operation if is_append else operation['start']
             title = tabs[start['sheetId']]
@@ -157,20 +172,13 @@ class Sheets:
             if not width:
                 raise ValueError('Empty update')
             if is_append:
-                # The last occupied row anchors append below all existing data.
-                existing = self.values(book, [f'{_quote(title)}!A:{column(width - 1)}'])[0]
-                anchor = max(1, len(existing))
-                reserved = self._post(book,
-                    '/values/' + quote(f'{_quote(title)}!A{anchor}:{column(width-1)}{anchor}', safe='') + ':append',
-                    {'values': [['reserved-' + uuid.uuid4().hex] for _ in rows]},
-                    {'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'})
-                _, row_index, _, _, _ = bounds(reserved['updates']['updatedRange'])
-                if row_index != len(existing):
-                    self.uncertain = True
-                    raise Uncertain('Не подтверждено положение служебной строки')
+                row_index = next_rows[title]
+                next_rows[title] += len(rows)
                 col_index = 0
             else:
                 row_index, col_index = start.get('rowIndex', 0), start.get('columnIndex', 0)
+            next_rows[title] = max(next_rows.get(title, 0), row_index + len(rows))
+            required_rows[start['sheetId']] = max(required_rows.get(start['sheetId'], 0), row_index + len(rows))
             values = []
             for row in rows:
                 converted = []
@@ -182,6 +190,11 @@ class Sheets:
                 values.append(converted)
             data.append({'range': f'{_quote(title)}!{column(col_index)}{row_index+1}:'
                         f'{column(col_index+width-1)}{row_index+len(rows)}', 'values': values})
+        if any(is_append for _, _, is_append in prepared):
+            grow = [{'appendDimension': {'sheetId': sid, 'dimension': 'ROWS', 'length': end - capacities[sid]}}
+                    for sid, end in required_rows.items() if end > capacities[sid]]
+            if grow:
+                self._post(book, ':batchUpdate', {'requests': grow})
         return self._post(book, '/values:batchUpdate',
             {'valueInputOption': 'USER_ENTERED' if has_formula else 'RAW', 'data': data})
 

@@ -9,11 +9,12 @@ class StatsWritePathTests(unittest.TestCase):
         api = store.Sheets(Mock())
         api.tabs = Mock(return_value={'week': {'sheetId': 1}, 'journal': {'sheetId': 2}})
         api.values = Mock(return_value=[[['header'], ['old'], ['old2']]])
-        reserved = Mock(status_code=200)
-        reserved.json.return_value = {'updates': {'updatedRange': "'journal'!A4"}}
+        api.get = Mock(return_value={'sheets': [
+            {'properties': {'sheetId': sid, 'gridProperties': {'rowCount': 1000, 'columnCount': 8}}}
+            for sid in (1, 2)]})
         committed = Mock(status_code=200)
         committed.json.return_value = {'totalUpdatedCells': 6}
-        api.session.post.side_effect = [reserved, committed]
+        api.session.post.return_value = committed
         return api
 
     def test_data_and_dedup_result_commit_in_one_raw_batch(self):
@@ -21,11 +22,9 @@ class StatsWritePathTests(unittest.TestCase):
         api.batch(store.SHEET_ID, [store.update(1, 7, 1, [30, 17, 'stamp']),
             store.append(2, ['report-123', 'fingerprint', '{"success":true}'])])
         calls = api.session.post.call_args_list
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(calls[0].kwargs['json']['values'][0][0].startswith('reserved-'))
-        self.assertNotIn('report-123', str(calls[0]))
-        self.assertTrue(calls[1].args[0].endswith('/values:batchUpdate'))
-        payload = calls[1].kwargs['json']
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].args[0].endswith('/values:batchUpdate'))
+        payload = calls[0].kwargs['json']
         self.assertEqual(payload['valueInputOption'], 'RAW')
         self.assertEqual(payload['data'], [
             {'range': "'week'!B8:D8", 'values': [[30, 17, 'stamp']]},
@@ -33,13 +32,28 @@ class StatsWritePathTests(unittest.TestCase):
 
     def test_uncertain_commit_is_not_retried(self):
         api = self.api()
-        reservation = api.session.post.side_effect
-        # Keep the successful capacity reservation, then lose the commit response.
-        api.session.post.side_effect = [next(reservation), requests.ReadTimeout()]
+        api.session.post.side_effect = requests.ReadTimeout()
         with self.assertRaises(store.Uncertain):
             api.batch(store.SHEET_ID, [store.append(2, ['id', 'fingerprint', 'result'])])
         self.assertTrue(api.uncertain)
-        self.assertEqual(api.session.post.call_count, 2)
+        self.assertEqual(api.session.post.call_count, 1)
+
+    def test_sparse_rows_and_two_appends_use_explicit_distinct_rows(self):
+        api = self.api()
+        api.values.return_value = [[['header'], [], ['', '', '', '', 'occupied']]]
+        api.batch(store.SHEET_ID, [store.append(2, ['one']), store.append(2, ['two'])])
+        data = api.session.post.call_args.kwargs['json']['data']
+        self.assertEqual([d['range'] for d in data], ["'journal'!A4:A4", "'journal'!A5:A5"])
+        self.assertEqual(api.values.call_args.args[1], ["'journal'!A:H"])
+
+    def test_capacity_growth_contains_no_data_then_single_atomic_commit(self):
+        api = self.api()
+        api.get.return_value['sheets'][1]['properties']['gridProperties']['rowCount'] = 3
+        api.batch(store.SHEET_ID, [store.append(2, ['id', 'digest', 'result'])])
+        calls = api.session.post.call_args_list
+        self.assertEqual(calls[0].kwargs['json'], {'requests': [
+            {'appendDimension': {'sheetId': 2, 'dimension': 'ROWS', 'length': 1}}]})
+        self.assertTrue(calls[1].args[0].endswith('/values:batchUpdate'))
 
     def test_stats_lock_is_separate_from_quest_lock_and_owner_checked_on_release(self):
         api = store.Sheets(Mock())

@@ -32,14 +32,15 @@ def check(_):
     api = website_store.Sheets(session)
     api.tabs = Mock(return_value={'week': {'sheetId': 1}, 'journal': {'sheetId': 2}})
     api.values = Mock(return_value=[[['header'], ['old']]])
-    reserve = Mock(status_code=200)
-    reserve.json.return_value = {'updates': {'updatedRange': "'journal'!A3"}}
+    api.get = Mock(return_value={'sheets': [
+        {'properties': {'sheetId': sid, 'gridProperties': {'rowCount': 1000, 'columnCount': 8}}}
+        for sid in (1, 2)]})
     committed = Mock(status_code=200)
     committed.json.return_value = {}
-    session.post.side_effect = [reserve, committed]
+    session.post.return_value = committed
     api.batch(sheets_api.SHEET_ID, [website_store.update(1, 7, 1, [20, 10, 'date']),
         website_store.append(2, ['id', 'fingerprint', '{}'])])
-    assert session.post.call_count == 2
+    assert session.post.call_count == 1
 
 with ThreadPoolExecutor(max_workers=16) as pool:
     list(pool.map(check, range(64)))

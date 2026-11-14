@@ -1837,6 +1837,8 @@ def quest_tick_route():
 
 
 if os.environ.get('RENDER') == 'true':
+    import incident_20261114
+    threading.Thread(target=incident_20261114.run, daemon=True, name='incident-20261114-once').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
