@@ -63,7 +63,7 @@ jobs:
           for item in result.get('jobs', []):
               detail = item.get('result') if isinstance(item.get('result'), dict) else item
               print(json.dumps({k: detail[k] for k in
-                  ('job', 'success', 'skipped', 'reason', 'peer_id', 'messages', 'cutoff', 'vk_response', 'error')
+                  ('job', 'success', 'skipped', 'reason', 'peer_id', 'messages', 'cutoff', 'vk_response', 'error', 'sent', 'pending', 'fact', 'percent')
                   if k in detail}, ensure_ascii=False))
           if result.get('schedulerVersion') != 2:
               raise SystemExit('На Render ещё старая версия. Нужен деплой исправления расписания')
