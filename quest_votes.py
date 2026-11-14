@@ -39,8 +39,7 @@ def options(stage, stages):
 
 
 def announcement(quest, stage, choices):
-    lines = [stage['текст'], '', '🗳 Голосование:']
-    lines += [f"{i}. {c['текст']}" for i, c in enumerate(choices, 1)]
+    lines = [stage['текст']]
     lines += ['', 'Нажми кнопку с выбранным вариантом под этим сообщением.',
               'Один голос на участника. До дедлайна выбор можно изменить.',
               'Приём до ' + deadline(stage).astimezone(ZoneInfo('Europe/Moscow')).strftime('%d.%m.%Y %H:%M МСК') + '.']
