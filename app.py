@@ -1400,6 +1400,8 @@ def vote_feedback(user_id, peer_id, event_id, text):
 
 
 def process_quest_vote_callback(event):
+    if admin_publish.quiet_vote_test.handle(event, VK_TOKEN, vote_feedback):
+        return
     from quest_votes import parse_payload
     from quest_engine import quest_api
     try:

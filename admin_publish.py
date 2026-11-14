@@ -9,6 +9,7 @@ import uuid
 from contextlib import contextmanager
 
 import requests
+import quiet_vote_test
 from sheets_api import _session, SHEET_ID
 from website_store import Sheets, Busy, append, update
 
@@ -330,6 +331,11 @@ def handle_message(message, send, token):
     if not actual:
         return False
     try:
+        if normalized(actual.get('text', '')) == normalized(quiet_vote_test.COMMAND):
+            quiet_vote_test.publish(send, token, actual['conversation_message_id'])
+            send(owner, '🦉 Тестовые кнопки отправлены в чат 2000000001. Нажми одну из них там.',
+                 random_id=f'quiet-vote-test-open:{actual["conversation_message_id"]}')
+            return True
         return Publisher(owner, GoogleDraftStore(owner), send).message(actual)
     except Exception:
         logging.exception('ADMIN_PUBLISH draft operation failed')
