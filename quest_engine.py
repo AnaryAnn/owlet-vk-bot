@@ -27,13 +27,14 @@ def tick(stats_loader, vk_sender, peer_id, dry_run=False):
         return payload
     sent = []
     for item in payload.get('outbox', []):
-        if item.get('peerId') and str(item['peerId']) != str(peer_id):
+        destination = int(item.get('peerId') or peer_id)
+        if destination not in (int(peer_id), 2000000001):
             continue
         if item.get('keyboard'):
-            vk_sender(peer_id, item['text'], keyboard=item['keyboard'], random_id='quest:' + item['eventId'])
+            vk_sender(destination, item['text'], keyboard=item['keyboard'], random_id='quest:' + item['eventId'])
         else:
-            vk_sender(peer_id, item['text'])
+            vk_sender(destination, item['text'])
         quest_api('ack', eventId=item['eventId'])
         sent.append(item['eventId'])
-    return {'success': True, 'fact': total_fact, 'percent': percent, 'sent': sent, 'pending': len(payload.get('outbox', []))}
+    return {'success': True, 'fact': total_fact, 'percent': percent, 'sent': sent, 'pending': len(payload.get('outbox', [])) - len(sent)}
 
