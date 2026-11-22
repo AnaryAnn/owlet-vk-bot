@@ -1,11 +1,12 @@
 """Прямая запись отчётов в Sheets после полного отключения Apps Script.
 
-Замок не имеет автоматического протухания: при неопределённом результате
-записи он сохраняется до проверки оператором, чтобы поздний ответ Google
-не повредил более новую запись. См. WEBSITE_MIGRATION.md.
+После неопределённой записи блокировка статистики требует проверки.
+Для таблицы артефактов бот снимает блокировку, если её владелец не менялся
+достаточно долго, чтобы ранее отправленная запись успела завершиться.
 """
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -30,6 +31,12 @@ STATS_LOCK_KEY = 'owlet_stats_write_v2'
 STATS_LOCK_BOOK = os.environ.get('STATS_LOCK_SPREADSHEET_ID') or os.environ.get('QUEST_SPREADSHEET_ID') or ARTIFACTS_ID
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
 _STATS_WRITERS = threading.RLock()
+_ARTIFACT_WRITERS = threading.Lock()
+_ARTIFACT_LOCK_OBSERVATION = None
+_ARTIFACT_WRITE_WINDOW = 45
+# Sheets allows up to 180 seconds for one request. Allow additional time
+# after the last possible write, including writes from a draining worker.
+_ARTIFACT_STALE_AFTER = 240
 
 
 class Busy(Exception):
@@ -90,6 +97,7 @@ class Sheets:
     def __init__(self, session):
         self.session = session
         self.uncertain = False
+        self._artifact_write_deadline = None
         self._tabs_cache = {}
 
     def get(self, book, suffix='', **params):
@@ -106,6 +114,9 @@ class Sheets:
         return self._post(book, ':batchUpdate', {'requests': requests_list})
 
     def _post(self, book, suffix, payload, params=None):
+        if (book == ARTIFACTS_ID and self._artifact_write_deadline is not None
+                and time.monotonic() >= self._artifact_write_deadline):
+            raise Busy('Истекло время записи в таблицу артефактов')
         try:
             kwargs = {'params': params} if params else {}
             r = self.session.post(BASE + book + suffix, json=payload, timeout=20, **kwargs)
@@ -233,18 +244,49 @@ class Sheets:
             with _STATS_WRITERS:
                 with self._locked_remote(book):
                     yield
+        elif book == ARTIFACTS_ID:
+            if not _ARTIFACT_WRITERS.acquire(timeout=5):
+                raise Busy('Таблица артефактов занята локальной записью')
+            try:
+                with self._locked_remote(book, recover_artifacts=True):
+                    yield
+            finally:
+                _ARTIFACT_WRITERS.release()
         else:
             with self._locked_remote(book):
                 yield
 
+    def _recover_artifact_lock(self):
+        global _ARTIFACT_LOCK_OBSERVATION
+        metadata = self.get(ARTIFACTS_ID, fields='developerMetadata').get('developerMetadata', [])
+        owner = next((item.get('metadataValue') for item in metadata
+                      if item.get('metadataId') == LOCK_ID and item.get('metadataKey') == LOCK_KEY), None)
+        if not owner:
+            _ARTIFACT_LOCK_OBSERVATION = None
+            return
+        now = time.monotonic()
+        if not _ARTIFACT_LOCK_OBSERVATION or _ARTIFACT_LOCK_OBSERVATION[0] != owner:
+            _ARTIFACT_LOCK_OBSERVATION = (owner, now)
+        elif now - _ARTIFACT_LOCK_OBSERVATION[1] >= _ARTIFACT_STALE_AFTER:
+            self.batch(ARTIFACTS_ID, self._release_requests(LOCK_ID, LOCK_KEY, owner))
+            _ARTIFACT_LOCK_OBSERVATION = None
+            logging.warning('ARTIFACT_LOCK_STALE_OWNER_RELEASED')
+
+    @staticmethod
+    def _release_requests(lock_id, lock_key, owner):
+        return [{'deleteDeveloperMetadata': {'dataFilter': {
+            'developerMetadataLookup': {'metadataId': lock_id,
+                'metadataKey': lock_key, 'metadataValue': owner}}}}]
+
     @contextmanager
-    def _locked_remote(self, book):
+    def _locked_remote(self, book, recover_artifacts=False):
         lock_id, lock_key = LOCK_ID, LOCK_KEY
         if book == SHEET_ID:
             book = STATS_LOCK_BOOK
             lock_id, lock_key = STATS_LOCK_ID, STATS_LOCK_KEY
             if book == SHEET_ID:
                 raise ValueError('The statistics lock must use a separate workbook')
+        started = time.monotonic() if recover_artifacts else None
         owner = str(uuid.uuid4())
         metadata = {'metadataId': lock_id, 'metadataKey': lock_key,
             'metadataValue': owner, 'location': {'spreadsheet': True}, 'visibility': 'DOCUMENT'}
@@ -265,16 +307,19 @@ class Sheets:
                     duplicate = any(m.get('metadataId') == lock_id and m.get('metadataKey') == lock_key
                                     for m in current)
                 if duplicate:
+                    if recover_artifacts:
+                        self._recover_artifact_lock()
                     raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
             raise
+        if recover_artifacts:
+            self._artifact_write_deadline = started + _ARTIFACT_WRITE_WINDOW
         try:
             yield
         finally:
-            # При потере ответа Google замок остаётся; нельзя пропускать новую запись.
+            self._artifact_write_deadline = None
+            # Keep uncertain writes isolated until their lock can safely be recovered.
             if not self.uncertain:
-                release = [{'deleteDeveloperMetadata': {'dataFilter': {
-                    'developerMetadataLookup': {'metadataId': lock_id,
-                        'metadataKey': lock_key, 'metadataValue': owner}}}}]
+                release = self._release_requests(lock_id, lock_key, owner)
                 # Retrying this owner-qualified deletion cannot remove a later
                 # writer's lock, even if Google applies a delayed first delete.
                 for attempt in range(3):
@@ -286,6 +331,24 @@ class Sheets:
                         if attempt == 2:
                             raise
                         time.sleep(.2 * (2 ** attempt))
+
+
+def check_artifact_lock():
+    for attempt in range(21):
+        try:
+            with _session(write=True) as session:
+                with Sheets(session).locked(ARTIFACTS_ID):
+                    pass
+            logging.warning('ARTIFACT_LOCK_STARTUP_OK')
+            return
+        except Busy:
+            if attempt < 20:
+                time.sleep(15)
+        except (Uncertain, requests.RequestException):
+            logging.exception('ARTIFACT_LOCK_STARTUP_CHECK_FAILED')
+            if attempt < 20:
+                time.sleep(15)
+    logging.error('ARTIFACT_LOCK_STARTUP_STILL_BUSY')
 
 
 def stamp():

@@ -22,6 +22,7 @@ from quest_milestones import send_milestones
 from report_comments import append_overplan_comment
 from report_trace import ReportTrace
 import native_storage
+from website_store import check_artifact_lock
 import quest_votes  # Callback dependencies are initialized before any worker starts.
 import admin_publish  # Initialize private-message handlers before worker threads.
 
@@ -1837,6 +1838,9 @@ def quest_tick_route():
 
 
 if os.environ.get('RENDER') == 'true':
+    if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
+        threading.Thread(target=check_artifact_lock,
+                         daemon=True, name='artifact-lock-check').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
