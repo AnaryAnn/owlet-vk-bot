@@ -1649,7 +1649,7 @@ def process_vk_event(data):
             report_id = f"vk-{event_id}"
             if trace: trace.step('save_start')
             result = google_save_report(
-                user_id, plan, fact, report_id, attempts=3
+                user_id, plan, fact, report_id, attempts=3, artifact_peer_id=peer_id
             )
             if trace: trace.step('save_done')
 
@@ -1663,7 +1663,7 @@ def process_vk_event(data):
                 })
                 if bind.get("success"):
                     result = google_save_report(
-                        user_id, plan, fact, report_id, attempts=3
+                        user_id, plan, fact, report_id, attempts=3, artifact_peer_id=peer_id
                     )
 
             if result.get("success"):
@@ -1682,7 +1682,7 @@ def process_vk_event(data):
                         plan,
                         fact,
                         report_id,
-                        bool(result.get("artifactEligible")),
+                        bool(result.get("artifactEligible") and not result.get("artifactPeerId")),
                     ),
                     daemon=True,
                 ).start()
@@ -1768,7 +1768,7 @@ def process_vk_event(data):
         plan, fact = map(int, m.groups())
         report_id = f"vk-{event_id}"
         result = google_save_report(
-            user_id, plan, fact, report_id, attempts=3
+            user_id, plan, fact, report_id, attempts=3, artifact_peer_id=peer_id
         )
 
         if result.get("unknownVkUser"):
@@ -1780,7 +1780,7 @@ def process_vk_event(data):
             })
             if bind.get("success"):
                 result = google_save_report(
-                    user_id, plan, fact, report_id, attempts=3
+                    user_id, plan, fact, report_id, attempts=3, artifact_peer_id=peer_id
                 )
 
         if result.get("success"):
@@ -1799,7 +1799,7 @@ def process_vk_event(data):
                         plan,
                         fact,
                         report_id,
-                        bool(result.get("artifactEligible")),
+                        bool(result.get("artifactEligible") and not result.get("artifactPeerId")),
                     ),
                     daemon=True,
                 ).start()
@@ -1887,11 +1887,11 @@ def send_owlet_message_route():
 
 
 
-def google_save_report(vk_id, plan, fact, report_id, attempts=3):
+def google_save_report(vk_id, plan, fact, report_id, attempts=3, *, artifact_peer_id=None):
     report_diag(report_id, 'save_enter')
     from website_store import Busy
     payload = {"action": "vkSave", "vkId": str(vk_id), "plan": int(plan),
-               "fact": int(fact), "reportId": str(report_id)}
+               "fact": int(fact), "reportId": str(report_id), "artifactPeerId": artifact_peer_id}
     for attempt in range(max(1, int(attempts))):
         try:
             report_diag(report_id, 'native_call_start', attempt=attempt)
@@ -2010,40 +2010,66 @@ def recover_nov22_failed_reports():
             app.logger.exception('NOV22_REPORT_RECOVERY_FAILED surname=%s', surname)
 
 
-def audit_nov22_card_results():
-    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 8, tzinfo=ZoneInfo('UTC')):
-        return
-    from sheets_api import _session
-    from website_store import ARTIFACTS_ID, Sheets, log_artifact_result
+def run_pending_card_draws():
+    from sheets_api import _session, SHEET_ID
+    from website_store import Sheets, ARTIFACTS_ID, artifact_drop, update
 
-    report_ids = (
-        'vk-f54d2753cd8eb608764c2028d6fa2d017a7e789c',
-        'vk-a34cb56b01649cfc345feb4bf36a6a1807edf33a',
-        'vk-bc17b8c2d004329b01d9362c417f0288d1a42eb8',
-        'vk-e60777275eb6b9d9e92c7425103ba369690366bc',
-        'vk-f1c306fe1f73a8fd96514ff55cdc309a6d4872fe',
-    )
-    try:
-        with _session() as session:
-            rows = Sheets(session).values(ARTIFACTS_ID, ["'_ArtifactDrops'!A2:H"])[0]
-        records = {row[0]: json.loads(row[7]) for row in rows
-                   if len(row) >= 8 and row[0] in report_ids}
-        for report_id in report_ids:
-            if report_id in records:
-                log_artifact_result(report_id, records[report_id], replayed=True)
-            else:
-                app.logger.warning('ARTIFACT_ROLL_AUDIT_MISSING report_id=%s', report_id)
-        app.logger.warning('ARTIFACT_ROLL_AUDIT_COMPLETE')
-    except Exception:
-        app.logger.exception('ARTIFACT_ROLL_AUDIT_FAILED')
+    recovered_peers = {
+        'vk-f54d2753cd8eb608764c2028d6fa2d017a7e789c': STATS_PEER_ID,
+        'vk-a34cb56b01649cfc345feb4bf36a6a1807edf33a': STATS_PEER_ID,
+        'vk-bc17b8c2d004329b01d9362c417f0288d1a42eb8': STATS_PEER_ID,
+        'vk-e60777275eb6b9d9e92c7425103ba369690366bc': STATS_PEER_ID,
+        'vk-f1c306fe1f73a8fd96514ff55cdc309a6d4872fe': 2000000001,
+    }
+    while True:
+        try:
+            with _session() as session:
+                storage = Sheets(session)
+                rows = storage.values(SHEET_ID, ["'_WebsiteReports'!A2:C"])[0]
+            for index, row in enumerate(rows, 1):
+                if len(row) < 3 or not str(row[0]).startswith('vk-'):
+                    continue
+                try:
+                    report = json.loads(row[2])
+                    peer_id = report.get('artifactPeerId') or recovered_peers.get(row[0])
+                    if not peer_id or report.get('artifactStatus') != 'pending':
+                        continue
+                    if row[0] in recovered_peers:
+                        report.setdefault('artifactChance', .4 if report['fact'] >= report['plan'] else .2)
+                    with _session(write=True) as session:
+                        result = artifact_drop(Sheets(session), report)
+                    if result.get('dropped'):
+                        random_id = (int.from_bytes(hashlib.sha256(
+                            f'artifact-outbox:{row[0]}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+                        if send_artifact_result(peer_id, report['vkId'], report['name'],
+                                                result, random_id=random_id) is None:
+                            raise RuntimeError('VK did not confirm artifact delivery')
+                    with _session(write=True) as session:
+                        storage = Sheets(session)
+                        with storage.locked(SHEET_ID):
+                            current = storage.values(SHEET_ID, [f"'_WebsiteReports'!A{index + 1}:C{index + 1}"])[0]
+                            if not current or current[0][0] != row[0]:
+                                raise RuntimeError('Report journal row moved')
+                            saved_report = json.loads(current[0][2])
+                            if saved_report.get('artifactStatus') == 'pending':
+                                saved_report.update(artifactStatus='done', artifact=result)
+                                journal = storage.tabs(SHEET_ID)['_WebsiteReports']['sheetId']
+                                storage.batch(SHEET_ID, [update(journal, index, 2,
+                                    [json.dumps(saved_report, ensure_ascii=False)])])
+                    app.logger.warning('ARTIFACT_OUTBOX_DONE report_id=%s', row[0])
+                except Exception as exc:
+                    app.logger.warning('ARTIFACT_OUTBOX_RETRY report_id=%s error=%s', row[0], repr(exc))
+        except Exception:
+            app.logger.exception('ARTIFACT_OUTBOX_READ_FAILED')
+        time.sleep(30)
 
 
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
-        threading.Thread(target=audit_nov22_card_results,
-                         daemon=True, name='audit-nov22-card-results').start()
+        threading.Thread(target=run_pending_card_draws,
+                         daemon=True, name='pending-card-draws').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 

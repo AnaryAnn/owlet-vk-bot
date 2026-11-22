@@ -180,7 +180,8 @@ def stats_post(data):
         with _session(write=True) as session:
             logging.warning('REPORT_NATIVE report_id=%s stage=write_session_ready', data.get('reportId'))
             api = Sheets(session)
-            result, _, _ = save_report(api, values[0], values[1], values[2], str(data['reportId']))
+            result, _, _ = save_report(api, values[0], values[1], values[2], str(data['reportId']),
+                                       artifact_peer_id=data.get('artifactPeerId'))
         logging.warning('REPORT_NATIVE report_id=%s stage=committed', data.get('reportId'))
         return dict(result, reportId=str(data['reportId']))
     with _session(write=True) as session:
@@ -258,7 +259,7 @@ def digest_post(data):
         return roll_report_artifact(data)
     with _session(write=True) as session:
         api = Sheets(session)
-        with api.locked(ARTIFACTS_ID):
+        with api.locked(ARTIFACTS_ID, digest=True):
             sid = api.ensure_tab(ARTIFACTS_ID, 'ChatLog', ['timestamp', 'peer_id', 'from_id', 'name', 'text', 'event_id'])
             rows = api.values(ARTIFACTS_ID, ["'ChatLog'!A2:F"])[0]
             if action in ('getEditionMessages', 'completeEdition'):

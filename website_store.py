@@ -32,7 +32,11 @@ STATS_LOCK_BOOK = os.environ.get('STATS_LOCK_SPREADSHEET_ID') or os.environ.get(
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
 _STATS_WRITERS = threading.RLock()
 _ARTIFACT_WRITERS = threading.Lock()
-_ARTIFACT_LOCK_OBSERVATION = None
+_ARTIFACT_LOCK_OBSERVATIONS = {}
+_DIGEST_WRITERS = threading.Lock()
+_DIGEST_LOCK_ID = 1937152403
+_DIGEST_LOCK_KEY = 'owlet_digest_write_v1'
+_DIGEST_LOCK_SWITCH_AT = time.monotonic() + 240
 _ARTIFACT_WRITE_WINDOW = 45
 # Sheets allows up to 180 seconds for one request. Allow additional time
 # after the last possible write, including writes from a draining worker.
@@ -241,7 +245,7 @@ class Sheets:
         return new_id
 
     @contextmanager
-    def locked(self, book):
+    def locked(self, book, *, digest=False):
         if book == SHEET_ID:
             # A single worker can receive many report threads at once. Queue
             # locally instead of making them collide at the remote mutex.
@@ -249,32 +253,34 @@ class Sheets:
                 with self._locked_remote(book):
                     yield
         elif book == ARTIFACTS_ID:
-            if not _ARTIFACT_WRITERS.acquire(timeout=5):
+            separate_digest = digest and time.monotonic() >= _DIGEST_LOCK_SWITCH_AT
+            writers = _DIGEST_WRITERS if separate_digest else _ARTIFACT_WRITERS
+            if not writers.acquire(timeout=5):
                 raise ArtifactLockBusy('Таблица артефактов занята локальной записью')
             try:
-                with self._locked_remote(book, recover_artifacts=True):
+                with self._locked_remote(book, recover_artifacts=True, digest=separate_digest):
                     yield
             finally:
-                _ARTIFACT_WRITERS.release()
+                writers.release()
         else:
             with self._locked_remote(book):
                 yield
 
-    def _recover_artifact_lock(self):
-        global _ARTIFACT_LOCK_OBSERVATION
+    def _recover_artifact_lock(self, lock_id, lock_key):
         metadata = self.get(ARTIFACTS_ID, fields='developerMetadata').get('developerMetadata', [])
         owner = next((item.get('metadataValue') for item in metadata
-                      if item.get('metadataId') == LOCK_ID and item.get('metadataKey') == LOCK_KEY), None)
+                      if item.get('metadataId') == lock_id and item.get('metadataKey') == lock_key), None)
         if not owner:
-            _ARTIFACT_LOCK_OBSERVATION = None
+            _ARTIFACT_LOCK_OBSERVATIONS.pop(lock_id, None)
             return
         now = time.monotonic()
-        if not _ARTIFACT_LOCK_OBSERVATION or _ARTIFACT_LOCK_OBSERVATION[0] != owner:
-            _ARTIFACT_LOCK_OBSERVATION = (owner, now)
-        elif now - _ARTIFACT_LOCK_OBSERVATION[1] >= _ARTIFACT_STALE_AFTER:
-            self.batch(ARTIFACTS_ID, self._release_requests(LOCK_ID, LOCK_KEY, owner))
-            _ARTIFACT_LOCK_OBSERVATION = None
-            logging.warning('ARTIFACT_LOCK_STALE_OWNER_RELEASED')
+        observation = _ARTIFACT_LOCK_OBSERVATIONS.get(lock_id)
+        if not observation or observation[0] != owner:
+            _ARTIFACT_LOCK_OBSERVATIONS[lock_id] = (owner, now)
+        elif now - observation[1] >= _ARTIFACT_STALE_AFTER:
+            self.batch(ARTIFACTS_ID, self._release_requests(lock_id, lock_key, owner))
+            _ARTIFACT_LOCK_OBSERVATIONS.pop(lock_id, None)
+            logging.warning('ARTIFACT_LOCK_STALE_OWNER_RELEASED lock=%s', lock_key)
 
     @staticmethod
     def _release_requests(lock_id, lock_key, owner):
@@ -283,8 +289,10 @@ class Sheets:
                 'metadataKey': lock_key, 'metadataValue': owner}}}}]
 
     @contextmanager
-    def _locked_remote(self, book, recover_artifacts=False):
+    def _locked_remote(self, book, recover_artifacts=False, digest=False):
         lock_id, lock_key = LOCK_ID, LOCK_KEY
+        if digest:
+            lock_id, lock_key = _DIGEST_LOCK_ID, _DIGEST_LOCK_KEY
         if book == SHEET_ID:
             book = STATS_LOCK_BOOK
             lock_id, lock_key = STATS_LOCK_ID, STATS_LOCK_KEY
@@ -312,7 +320,7 @@ class Sheets:
                                     for m in current)
                 if duplicate:
                     if recover_artifacts:
-                        self._recover_artifact_lock()
+                        self._recover_artifact_lock(lock_id, lock_key)
                         raise ArtifactLockBusy('Таблица артефактов занята удалённой записью') from exc
                     raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
             raise
@@ -366,7 +374,7 @@ def _journal(api):
     return tab, rows
 
 
-def save_report(api, name, plan, fact, report_id):
+def save_report(api, name, plan, fact, report_id, *, artifact_peer_id=None):
     with api.locked(SHEET_ID):
         journal_id, journal = _journal(api)
         digest = fingerprint(name, plan, fact)
@@ -406,6 +414,9 @@ def save_report(api, name, plan, fact, report_id):
             'artifactEligible': fact > previous_fact, 'changed': bool(changed),
             'artifactStatus': 'pending' if fact > previous_fact else 'skipped',
             'notificationStatus': 'pending' if changed else 'skipped'}
+        if result['artifactEligible'] and artifact_peer_id:
+            result['artifactPeerId'] = int(artifact_peer_id)
+            result['artifactChance'] = artifact_chance(plan, fact)
         journal_row = len(journal) + 1
         # Строка отчёта и защита от повтора — одна атомарная запись Google.
         api.batch(SHEET_ID, [update(tabs[title]['sheetId'], index, 1, [plan, fact, stamp() if changed else old[3]]),
@@ -460,7 +471,8 @@ def artifact_drop(api, report, rng=None):
                 result = json.loads(row[7])
                 log_artifact_result(report['requestId'], result, replayed=True)
                 return result
-        chance = artifact_chance(report['plan'], report['fact'])
+        chance = (report['artifactChance'] if 'artifactChance' in report else
+                  artifact_chance(report['plan'], report['fact']))
         result = {'success': True, 'attempted': True, 'dropped': False, 'chance': chance}
         writes = []
         if rng.random() < chance:
@@ -471,7 +483,11 @@ def artifact_drop(api, report, rng=None):
                 if roll < 0:
                     selected = item
                     break
-            catalog = api.values(ARTIFACTS_ID, ["'Артефакты'!A2:E"])[0]
+            inventory = api.tabs(ARTIFACTS_ID)
+            ranges = ["'Артефакты'!A2:E"]
+            if 'Инвентарь' in inventory:
+                ranges.append("'Инвентарь'!A2:H")
+            catalog, *inventory_rows = api.values(ARTIFACTS_ID, ranges)
             choices = [r for r in catalog if len(r) >= 3 and str(r[0]).strip() and str(r[2]).strip()
                 and str(r[1]).strip().lower().replace('ё', 'е') == selected[0]]
             if not choices:
@@ -482,11 +498,10 @@ def artifact_drop(api, report, rng=None):
                 log_artifact_result(report['requestId'], result)
                 return result
             a = rng.choice(choices)
-            inventory = api.tabs(ARTIFACTS_ID)
-            if 'Инвентарь' not in inventory:
+            if not inventory_rows:
                 raise Busy('Лист «Инвентарь» ещё не создан')
             inventory_id = inventory['Инвентарь']['sheetId']
-            rows = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H"])[0]
+            rows = inventory_rows[0]
             found = [(i + 1, r) for i, r in enumerate(rows) if len(r) >= 3
                 and str(r[0]).strip() == report['vkId'] and str(r[2]).strip() == str(a[0]).strip()]
             if len(found) > 1:
