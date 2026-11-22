@@ -739,26 +739,30 @@ def send_artifact_result(peer_id, vk_id, name, roll, random_id=None):
 
 def recover_nov22_artifact_rolls():
     from sheets_api import _session, SHEET_ID
-    from website_store import Sheets
+    from website_store import ARTIFACTS_ID, Sheets
 
     report_ids = (
-        'vk-d5d8bcb3128462cc3f9bc7417fe12df80eeddc70',
-        'vk-30ca5a8c1f70925f3e8625bbc8a64661be02339d',
-        'vk-01d762cabe9c3da208cf88bfd3f8470f510d87b7',
-        'vk-e89b620d9639467c1ac0964a942f3d671a84f9ee',
+        'vk-d77b560900261ee6fc1064ea5122304cd76ae73d',
+        'vk-1acaca1d6f3e9939915f01f13e257d19f7ce1118',
     )
     if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 9, tzinfo=ZoneInfo('UTC')):
         return
     try:
         with _session() as session:
-            rows = Sheets(session).values(SHEET_ID, ["'_WebsiteReports'!A2:C"])[0]
+            api = Sheets(session)
+            rows = api.values(SHEET_ID, ["'_WebsiteReports'!A2:C"])[0]
+            previous_rolls = api.values(ARTIFACTS_ID, ["'_ArtifactDrops'!A2:A"])[0]
+            already_rolled = {row[0] for row in previous_rolls if row}
         records = {row[0]: json.loads(row[2]) for row in rows
                    if len(row) >= 3 and row[0] in report_ids}
     except Exception:
-        app.logger.exception('ARTIFACT_RECOVERY_READ_FAILED')
+        app.logger.exception('ARTIFACT_RECOVERY_FOLLOWUP_READ_FAILED')
         return
     for index, report_id in enumerate(report_ids, 1):
         try:
+            if report_id in already_rolled:
+                app.logger.warning('ARTIFACT_RECOVERY_FOLLOWUP_ALREADY_RECORDED index=%s', index)
+                continue
             report = records.get(report_id)
             if not report or not report.get('artifactEligible'):
                 raise ValueError('Eligible report missing from journal')
@@ -772,10 +776,10 @@ def recover_nov22_artifact_rolls():
                                                     report['name'], roll, random_id=random_id)
                 if notification is None:
                     raise RuntimeError('VK did not confirm artifact notification')
-            app.logger.warning('ARTIFACT_RECOVERY_OK index=%s dropped=%s chance=%s',
+            app.logger.warning('ARTIFACT_RECOVERY_FOLLOWUP_OK index=%s dropped=%s chance=%s',
                                index, dropped, roll.get('chance'))
         except Exception:
-            app.logger.exception('ARTIFACT_RECOVERY_FAILED index=%s', index)
+            app.logger.exception('ARTIFACT_RECOVERY_FOLLOWUP_FAILED index=%s', index)
 
 
 def send_report_confirmation_background(
