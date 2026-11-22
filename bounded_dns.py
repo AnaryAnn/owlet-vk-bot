@@ -4,6 +4,9 @@ import socket
 import time
 import dns.exception
 import dns.resolver
+import dns.rdata
+import dns.rdataclass
+import dns.rdatatype
 
 _HOSTS = frozenset(('api.vk.com', 'oauth2.googleapis.com', 'sheets.googleapis.com'))
 _original_getaddrinfo = socket.getaddrinfo
@@ -39,5 +42,8 @@ def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 
 
 def install():
+    # Load common record parsers before worker threads perform DNS lookups.
+    for record_type in ('A', 'AAAA', 'CNAME', 'SOA', 'NS', 'OPT'):
+        dns.rdata.get_rdata_class(dns.rdataclass.IN, dns.rdatatype.from_text(record_type))
     # Scoped by _HOSTS. TLS still verifies the original API hostname.
     socket.getaddrinfo = getaddrinfo

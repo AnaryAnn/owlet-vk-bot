@@ -601,14 +601,24 @@ def send_personal_collection(peer_id, event_id):
 
     def send(text, part, attachment=None):
         message_id = f'collection:{peer_id}:{event_id}:{part}' if event_id else None
-        return vk_send(peer_id, text, attachment=attachment, random_id=message_id)
+        for attempt in range(3):
+            try:
+                return vk_send(peer_id, text, attachment=attachment, random_id=message_id)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 2:
+                    raise
+                time.sleep(1 + attempt)
 
-    try:
-        collection = read('collection', str(peer_id), include_vk_photos=True)
-    except Exception:
-        app.logger.exception('PERSONAL_COLLECTION_READ_FAILED')
-        send('🦉 Сейчас не удалось открыть коллекцию. Попробуй чуть позже.', 'error')
-        return
+    for attempt in range(3):
+        try:
+            collection = read('collection', str(peer_id), include_vk_photos=True)
+            break
+        except Exception:
+            if attempt == 2:
+                app.logger.exception('PERSONAL_COLLECTION_READ_FAILED')
+                send('🦉 Сейчас не удалось открыть коллекцию. Попробуй чуть позже.', 'error')
+                return False
+            time.sleep(1 + attempt)
     cards = collection['personal']['cards']
     copies = sum(card['count'] for card in cards)
     message = f"🦉 Твоя коллекция\nУникальных карточек: {len(cards)} из {collection['total']}"
@@ -632,6 +642,17 @@ def send_personal_collection(peer_id, event_id):
                 line += ' (изображение пока недоступно)'
             lines.append(line)
         send('\n'.join(lines), f'cards:{start}', attachment=','.join(photos) or None)
+    return True
+
+
+def replay_collection_request():
+    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 8, tzinfo=ZoneInfo('UTC')):
+        return
+    try:
+        if send_personal_collection(54341305, '13be559220830435052b057f373ffd2dc6977ff8'):
+            app.logger.warning('PERSONAL_COLLECTION_REPLAY_SENT')
+    except Exception:
+        app.logger.exception('PERSONAL_COLLECTION_REPLAY_FAILED')
 
 
 def vk_send_reliable(peer_id, text, attachment=None, attempts=6, random_id=None):
@@ -1965,8 +1986,8 @@ if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
-        threading.Thread(target=recover_katya_report,
-                         daemon=True, name='recover-katya-report').start()
+        threading.Thread(target=replay_collection_request,
+                         daemon=True, name='replay-collection-request').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
