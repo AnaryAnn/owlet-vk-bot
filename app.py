@@ -1952,42 +1952,50 @@ def quest_tick_route():
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
-def recover_katya_report():
+def recover_nov22_failed_reports():
     if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 8, tzinfo=ZoneInfo('UTC')):
         return
-    event_id = '18254bc6afab32b90798d55cbcdde7dc71e5b981'
-    report_id = f'vk-{event_id}'
+    reports = (
+        ('4fd10ab5533543fb9d3c52eea1c0e17716d6b67c', 'барская', ('катя', 'екатерина'), 38, 36),
+        ('489ae1e3abd3740aab9fe0a286a6ff6491a4ccee', 'юмагужина', ('ольга',), 40, 20),
+    )
     try:
         participants = google_get({'action': 'participants'})['participants']
-        matches = [person for person in participants
-                   if set(person['name'].casefold().split()) in
-                   ({'катя', 'марусина'}, {'екатерина', 'марусина'})]
-        if len(matches) != 1 or not str(matches[0]['vkId']).isdigit():
-            raise ValueError('Cannot resolve report author uniquely')
-        user_id = int(matches[0]['vkId'])
-        result = google_save_report(user_id, 2, 2, report_id)
-        if not result.get('success'):
-            raise RuntimeError('Report save was not confirmed')
-        app.logger.warning('KATYA_REPORT_SAVED')
-        mark_event_async(event_id, user_id, STATS_PEER_ID)
-        random_id = (int.from_bytes(hashlib.sha256(
-            f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
-        confirmation = send_report_confirmation_background(
-            STATS_PEER_ID, user_id, result['name'], 2, 2, report_id,
-            bool(result.get('artifactEligible')), random_id=random_id)
-        if confirmation is None:
-            raise RuntimeError('VK did not confirm the report notification')
-        app.logger.warning('KATYA_REPORT_CONFIRMED')
     except Exception:
-        app.logger.exception('KATYA_REPORT_RECOVERY_FAILED')
+        app.logger.exception('NOV22_REPORT_RECOVERY_PARTICIPANTS_FAILED')
+        return
+    for event_id, surname, names, plan, fact in reports:
+        report_id = f'vk-{event_id}'
+        try:
+            matches = [person for person in participants
+                       if set(person['name'].casefold().split()) in
+                       [{surname, name} for name in names]]
+            if len(matches) != 1 or not str(matches[0]['vkId']).isdigit():
+                raise ValueError('Cannot resolve report author uniquely')
+            user_id = int(matches[0]['vkId'])
+            result = google_save_report(user_id, plan, fact, report_id)
+            if not result.get('success'):
+                raise RuntimeError('Report save was not confirmed')
+            app.logger.warning('NOV22_REPORT_RECOVERY_SAVED surname=%s', surname)
+            mark_event_async(event_id, user_id, STATS_PEER_ID)
+            random_id = (int.from_bytes(hashlib.sha256(
+                f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+            confirmation = send_report_confirmation_background(
+                STATS_PEER_ID, user_id, result['name'], plan, fact, report_id,
+                bool(result.get('artifactEligible')), random_id=random_id)
+            if confirmation is None:
+                raise RuntimeError('VK did not confirm the report notification')
+            app.logger.warning('NOV22_REPORT_RECOVERY_CONFIRMED surname=%s', surname)
+        except Exception:
+            app.logger.exception('NOV22_REPORT_RECOVERY_FAILED surname=%s', surname)
 
 
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
-        threading.Thread(target=replay_collection_request,
-                         daemon=True, name='replay-collection-request').start()
+        threading.Thread(target=recover_nov22_failed_reports,
+                         daemon=True, name='recover-nov22-failed-reports').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
