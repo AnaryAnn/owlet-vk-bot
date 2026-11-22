@@ -9,7 +9,7 @@ import logging
 from datetime import date, timedelta
 
 from sheets_api import _session, _quote, _number, current_week, SHEET_ID
-from website_store import Sheets, ARTIFACTS_ID, append, update, save_report, artifact_drop, stamp
+from website_store import ArtifactLockBusy, Sheets, ARTIFACTS_ID, append, update, save_report, artifact_drop, stamp
 
 
 def enabled():
@@ -238,13 +238,26 @@ def stats_post(data):
             raise ValueError('Неизвестная запись статистики')
 
 
+def roll_report_artifact(data):
+    report = dict(requestId=str(data['reportId']), vkId=str(data['vkId']),
+                  name=str(data['name']), plan=data['plan'], fact=data['fact'])
+    retry_delays = (1, 2, 4, 8, 15, 30, 30, 30, 30, 30, 30, 30)
+    for delay in retry_delays:
+        try:
+            with _session(write=True) as session:
+                return artifact_drop(Sheets(session), report)
+        except ArtifactLockBusy:
+            time.sleep(delay + random.random())
+    with _session(write=True) as session:
+        return artifact_drop(Sheets(session), report)
+
+
 def digest_post(data):
     enabled(); action = data.get('action')
+    if action == 'rollArtifact':
+        return roll_report_artifact(data)
     with _session(write=True) as session:
         api = Sheets(session)
-        if action == 'rollArtifact':
-            return artifact_drop(api, dict(requestId=str(data['reportId']), vkId=str(data['vkId']),
-                name=str(data['name']), plan=data['plan'], fact=data['fact']))
         with api.locked(ARTIFACTS_ID):
             sid = api.ensure_tab(ARTIFACTS_ID, 'ChatLog', ['timestamp', 'peer_id', 'from_id', 'name', 'text', 'event_id'])
             rows = api.values(ARTIFACTS_ID, ["'ChatLog'!A2:F"])[0]

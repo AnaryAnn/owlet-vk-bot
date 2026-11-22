@@ -43,6 +43,10 @@ class Busy(Exception):
     pass
 
 
+class ArtifactLockBusy(Busy):
+    pass
+
+
 class Conflict(Exception):
     pass
 
@@ -246,7 +250,7 @@ class Sheets:
                     yield
         elif book == ARTIFACTS_ID:
             if not _ARTIFACT_WRITERS.acquire(timeout=5):
-                raise Busy('Таблица артефактов занята локальной записью')
+                raise ArtifactLockBusy('Таблица артефактов занята локальной записью')
             try:
                 with self._locked_remote(book, recover_artifacts=True):
                     yield
@@ -309,6 +313,7 @@ class Sheets:
                 if duplicate:
                     if recover_artifacts:
                         self._recover_artifact_lock()
+                        raise ArtifactLockBusy('Таблица артефактов занята удалённой записью') from exc
                     raise Busy('Таблица занята. Повторите запрос с тем же идентификатором') from exc
             raise
         if recover_artifacts:
