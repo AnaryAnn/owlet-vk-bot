@@ -596,13 +596,14 @@ def vk_send(peer_id, text, attachment=None, keyboard=None, random_id=None):
 
 
 
-def vk_send_reliable(peer_id, text, attachment=None, attempts=6):
+def vk_send_reliable(peer_id, text, attachment=None, attempts=6, random_id=None):
     """
     Надёжная отправка коротких служебных ответов Робосычика.
     Один random_id сохраняется между повторами, чтобы при сетевом таймауте
     VK не создал дубликат уже принятого сообщения.
     """
-    random_id = random.randint(1, 2147483647)
+    if random_id is None:
+        random_id = random.randint(1, 2147483647)
     last_error = None
 
     for attempt in range(1, attempts + 1):
@@ -698,6 +699,85 @@ def roll_artifact_direct(vk_id, name, plan, fact, report_id, started=None):
     return result
 
 
+def send_artifact_result(peer_id, vk_id, name, roll, random_id=None):
+    attachment = None
+    artifact = (roll or {}).get("artifact") or {}
+
+    if (roll or {}).get("dropped") and artifact:
+        intro = str(
+            artifact.get("intro") or "✨ Робосычик нашёл артефакт!"
+        ).strip()
+        emoji = str(artifact.get("emoji") or "").strip()
+        label = str(artifact.get("label") or "Выпал артефакт").strip()
+        artifact_name = str(
+            artifact.get("name") or "Неизвестный артефакт"
+        ).strip()
+        description = str(artifact.get("description") or "").strip()
+        vk_photo = str(artifact.get("vkPhoto") or "").strip()
+
+        recipient_name = str(name or "Участник").replace("|", " ").replace("]", "").replace("[", "")
+        recipient = (f"[id{vk_id}|{recipient_name}]"
+                     if str(vk_id).isdigit() else recipient_name)
+        artifact_lines = [
+            f"🎁 Получатель: {recipient}",
+            "",
+            intro,
+            "",
+            f"{emoji} {label}".strip(),
+            artifact_name,
+        ]
+        if description:
+            artifact_lines += ["", f"«{description}»"]
+        message = "\n".join(artifact_lines)
+
+        if re.fullmatch(
+            r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE
+        ):
+            attachment = vk_photo.lower()
+        return vk_send_reliable(peer_id, message, attachment=attachment, attempts=6, random_id=random_id)
+
+
+def recover_nov22_artifact_rolls():
+    from sheets_api import _session, SHEET_ID
+    from website_store import Sheets
+
+    report_ids = (
+        'vk-d5d8bcb3128462cc3f9bc7417fe12df80eeddc70',
+        'vk-30ca5a8c1f70925f3e8625bbc8a64661be02339d',
+        'vk-01d762cabe9c3da208cf88bfd3f8470f510d87b7',
+        'vk-e89b620d9639467c1ac0964a942f3d671a84f9ee',
+    )
+    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 9, tzinfo=ZoneInfo('UTC')):
+        return
+    try:
+        with _session() as session:
+            rows = Sheets(session).values(SHEET_ID, ["'_WebsiteReports'!A2:C"])[0]
+        records = {row[0]: json.loads(row[2]) for row in rows
+                   if len(row) >= 3 and row[0] in report_ids}
+    except Exception:
+        app.logger.exception('ARTIFACT_RECOVERY_READ_FAILED')
+        return
+    for index, report_id in enumerate(report_ids, 1):
+        try:
+            report = records.get(report_id)
+            if not report or not report.get('artifactEligible'):
+                raise ValueError('Eligible report missing from journal')
+            roll = roll_artifact_direct(report['vkId'], report['name'], report['plan'],
+                                        report['fact'], report_id, time.monotonic())
+            dropped = bool(roll.get('dropped'))
+            if dropped:
+                random_id = (int.from_bytes(hashlib.sha256(
+                    f'artifact-recovery:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+                notification = send_artifact_result(STATS_PEER_ID, report['vkId'],
+                                                    report['name'], roll, random_id=random_id)
+                if notification is None:
+                    raise RuntimeError('VK did not confirm artifact notification')
+            app.logger.warning('ARTIFACT_RECOVERY_OK index=%s dropped=%s chance=%s',
+                               index, dropped, roll.get('chance'))
+        except Exception:
+            app.logger.exception('ARTIFACT_RECOVERY_FAILED index=%s', index)
+
+
 def send_report_confirmation_background(
     peer_id, vk_id, name, plan, fact, report_id, artifact_eligible=False
 ):
@@ -725,40 +805,7 @@ def send_report_confirmation_background(
     if artifact_eligible and report_id:
         try:
             roll = roll_artifact_direct(vk_id, name, plan, fact, report_id, started)
-            artifact = (roll or {}).get("artifact") or {}
-
-            if (roll or {}).get("dropped") and artifact:
-                intro = str(
-                    artifact.get("intro") or "✨ Робосычик нашёл артефакт!"
-                ).strip()
-                emoji = str(artifact.get("emoji") or "").strip()
-                label = str(artifact.get("label") or "Выпал артефакт").strip()
-                artifact_name = str(
-                    artifact.get("name") or "Неизвестный артефакт"
-                ).strip()
-                description = str(artifact.get("description") or "").strip()
-                vk_photo = str(artifact.get("vkPhoto") or "").strip()
-
-                recipient_name = str(name or "Участник").replace("|", " ").replace("]", "").replace("[", "")
-                recipient = (f"[id{vk_id}|{recipient_name}]"
-                             if str(vk_id).isdigit() else recipient_name)
-                artifact_lines = [
-                    f"🎁 Получатель: {recipient}",
-                    "",
-                    intro,
-                    "",
-                    f"{emoji} {label}".strip(),
-                    artifact_name,
-                ]
-                if description:
-                    artifact_lines += ["", f"«{description}»"]
-                message = "\n".join(artifact_lines)
-
-                if re.fullmatch(
-                    r"photo-?\d+_\d+", vk_photo, flags=re.IGNORECASE
-                ):
-                    attachment = vk_photo.lower()
-                vk_send_reliable(peer_id, message, attachment=attachment, attempts=6)
+            send_artifact_result(peer_id, vk_id, name, roll)
         except Exception as exc:
             # Артефакт не должен задерживать или ломать подтверждение отчёта.
             print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
@@ -1841,6 +1888,8 @@ if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
+        threading.Thread(target=recover_nov22_artifact_rolls,
+                         daemon=True, name='artifact-recovery-nov22').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
