@@ -15,7 +15,7 @@ import threading
 import uuid
 from urllib.parse import quote
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -412,6 +412,30 @@ RARITIES = [('обычный', 65, '⚪'), ('необычный', 22, '🟢'),
             ('редкий', 9, '🔵'), ('эпический', 3, '🟣'), ('легендарный', 1, '🟡')]
 
 
+def artifact_chance(plan, fact, now=None):
+    base = .20 if fact >= plan else .10
+    now = now or datetime.now(timezone.utc)
+    end_setting = os.environ.get('ARTIFACT_BOOST_UNTIL')
+    try:
+        if end_setting is None:
+            # The first campaign is scheduled for exactly 36 hours.
+            start = datetime.fromisoformat('2026-11-22T06:50:00+00:00')
+            end = datetime.fromisoformat('2026-11-23T18:50:00+00:00')
+            multiplier = 2.0
+        elif end_setting:
+            start = datetime.min.replace(tzinfo=timezone.utc)
+            end = datetime.fromisoformat(end_setting.replace('Z', '+00:00'))
+            multiplier = float(os.environ.get('ARTIFACT_BOOST_MULTIPLIER', '2'))
+        else:
+            return base
+        if end.tzinfo is None or not 1 <= multiplier < float('inf'):
+            raise ValueError('Expected an expiry with timezone and a finite multiplier >= 1')
+        return min(1.0, base * multiplier) if start <= now < end else base
+    except ValueError:
+        logging.error('ARTIFACT_BOOST_INVALID_CONFIG')
+        return base
+
+
 def artifact_drop(api, report, rng=None):
     rng = rng or random.SystemRandom()
     with api.locked(ARTIFACTS_ID):
@@ -421,7 +445,7 @@ def artifact_drop(api, report, rng=None):
         for row in logs:
             if row and row[0] == report['requestId']:
                 return json.loads(row[7])
-        chance = .20 if report['fact'] >= report['plan'] else .10
+        chance = artifact_chance(report['plan'], report['fact'])
         result = {'success': True, 'attempted': True, 'dropped': False, 'chance': chance}
         writes = []
         if rng.random() < chance:
