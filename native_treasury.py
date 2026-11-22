@@ -23,7 +23,7 @@ def count(value):
         return 0
 
 
-def build(action, vk_id, inventory, catalog):
+def build(action, vk_id, inventory, catalog, *, include_vk_photos=False):
     if action == 'participants':
         people = {}
         for row in inventory:
@@ -45,6 +45,9 @@ def build(action, vk_id, inventory, catalog):
             image = image if image.startswith(PREFIX) else ''
             cards[ident] = dict(id=ident, rarity=str(row[1]), name=str(row[2]),
                 description=str(row[3]), hasImage=bool(image), imageUrl=image)
+            if include_vk_photos:
+                photo = str(row[4]).strip()
+                cards[ident]['vkPhoto'] = photo if re.fullmatch(r'photo-?\d+_\d+(?:_[\w-]+)?', photo) else ''
     for row in inventory:
         row = list(row) + [''] * max(0, 6 - len(row))
         ident, quantity = valid_id(row[2]), count(row[5])
@@ -60,8 +63,8 @@ def build(action, vk_id, inventory, catalog):
         'common': {'unique': len(common), 'cards': common}}
 
 
-def read(action, vk_id='0'):
+def read(action, vk_id='0', *, include_vk_photos=False):
     with _session() as session:
         inventory, catalog = Sheets(session).values(ARTIFACTS_ID,
             ["'Инвентарь'!A2:H", "'Артефакты'!A2:F"])
-    return build(action, vk_id, inventory, catalog)
+    return build(action, vk_id, inventory, catalog, include_vk_photos=include_vk_photos)

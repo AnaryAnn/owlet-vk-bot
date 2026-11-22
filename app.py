@@ -596,6 +596,44 @@ def vk_send(peer_id, text, attachment=None, keyboard=None, random_id=None):
 
 
 
+def send_personal_collection(peer_id, event_id):
+    from native_treasury import read
+
+    def send(text, part, attachment=None):
+        message_id = f'collection:{peer_id}:{event_id}:{part}' if event_id else None
+        return vk_send(peer_id, text, attachment=attachment, random_id=message_id)
+
+    try:
+        collection = read('collection', str(peer_id), include_vk_photos=True)
+    except Exception:
+        app.logger.exception('PERSONAL_COLLECTION_READ_FAILED')
+        send('🦉 Сейчас не удалось открыть коллекцию. Попробуй чуть позже.', 'error')
+        return
+    cards = collection['personal']['cards']
+    copies = sum(card['count'] for card in cards)
+    message = f"🦉 Твоя коллекция\nУникальных карточек: {len(cards)} из {collection['total']}"
+    if copies > len(cards):
+        message += f'\nВсего с повторами: {copies:g}'
+    send(message, 'summary')
+
+    for start in range(0, len(cards), 5):
+        batch = cards[start:start + 5]
+        lines = []
+        photos = []
+        for card in batch:
+            line = f"№{card['id']} — {card['name']}"
+            if card['count'] > 1:
+                line += f" ×{card['count']:g}"
+            if card['vkPhoto']:
+                photos.append(card['vkPhoto'])
+            elif card['imageUrl']:
+                line += f"\n{card['imageUrl']}"
+            else:
+                line += ' (изображение пока недоступно)'
+            lines.append(line)
+        send('\n'.join(lines), f'cards:{start}', attachment=','.join(photos) or None)
+
+
 def vk_send_reliable(peer_id, text, attachment=None, attempts=6, random_id=None):
     """
     Надёжная отправка коротких служебных ответов Робосычика.
@@ -1512,7 +1550,10 @@ def process_vk_event(data):
         if peer_id and 0 < int(peer_id) < 2000000000:
             trace = ReportTrace(event_id)
             trace.step('private_handler_start')
-            admin_publish.handle_message(msg, vk_send, VK_TOKEN)
+            if str(user_id) == str(peer_id) and ' '.join(text.casefold().split()) == 'моя коллекция':
+                send_personal_collection(int(peer_id), event_id)
+            else:
+                admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             trace.step('private_handler_done')
             return Response('ok')
 
