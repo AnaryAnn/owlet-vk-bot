@@ -740,15 +740,20 @@ def roll_artifact_direct(vk_id, name, plan, fact, report_id, started=None):
     """Бросок артефакта через нативное хранилище Google Sheets."""
     report_diag(report_id, "artifact_request_start", started, vk_id=str(vk_id))
     t0 = time.monotonic()
-    result = digest_post({
-        "action": "rollArtifact",
-        "reportId": str(report_id),
-        "vkId": str(vk_id),
-        "name": str(name or ""),
-        "plan": int(plan),
-        "fact": int(fact),
-        "forceArtifactDrop": str(vk_id) == "54341305",
-    }, timeout=12)
+    try:
+        result = digest_post({
+            "action": "rollArtifact",
+            "reportId": str(report_id),
+            "vkId": str(vk_id),
+            "name": str(name or ""),
+            "plan": int(plan),
+            "fact": int(fact),
+            "forceArtifactDrop": str(vk_id) == "54341305",
+        }, timeout=12)
+    except Exception as exc:
+        app.logger.warning('ARTIFACT_ROLL_ERROR report_id=%s error_type=%s elapsed=%.3fs',
+                           report_id, type(exc).__name__, time.monotonic() - t0)
+        raise
     report_diag(
         report_id, "artifact_request_done", started,
         request_seconds=round(time.monotonic() - t0, 3),

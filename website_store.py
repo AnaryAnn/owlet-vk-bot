@@ -441,6 +441,14 @@ def artifact_chance(plan, fact, now=None):
         return base
 
 
+def log_artifact_result(report_id, result, *, replayed=False):
+    outcome = 'catalog_error' if result.get('error') else (
+        'dropped' if result.get('dropped') else 'not_dropped')
+    logging.warning('ARTIFACT_ROLL_RESULT report_id=%s outcome=%s chance=%s card_id=%s replayed=%s',
+                    report_id, outcome, result.get('chance'),
+                    (result.get('artifact') or {}).get('id'), replayed)
+
+
 def artifact_drop(api, report, rng=None):
     rng = rng or random.SystemRandom()
     with api.locked(ARTIFACTS_ID):
@@ -449,7 +457,9 @@ def artifact_drop(api, report, rng=None):
         logs = api.values(ARTIFACTS_ID, ["'_ArtifactDrops'!A2:H"])[0]
         for row in logs:
             if row and row[0] == report['requestId']:
-                return json.loads(row[7])
+                result = json.loads(row[7])
+                log_artifact_result(report['requestId'], result, replayed=True)
+                return result
         chance = artifact_chance(report['plan'], report['fact'])
         result = {'success': True, 'attempted': True, 'dropped': False, 'chance': chance}
         writes = []
@@ -469,6 +479,7 @@ def artifact_drop(api, report, rng=None):
                 api.batch(ARTIFACTS_ID, [append(log_id, [report['requestId'], stamp(),
                     report['vkId'], report['name'], report['plan'], report['fact'], chance,
                     json.dumps(result, ensure_ascii=False)])])
+                log_artifact_result(report['requestId'], result)
                 return result
             a = rng.choice(choices)
             inventory = api.tabs(ARTIFACTS_ID)
@@ -495,6 +506,7 @@ def artifact_drop(api, report, rng=None):
         writes.append(append(log_id, [report['requestId'], stamp(), report['vkId'],
             report['name'], report['plan'], report['fact'], chance, json.dumps(result, ensure_ascii=False)]))
         api.batch(ARTIFACTS_ID, writes)
+        log_artifact_result(report['requestId'], result)
         return result
 
 
