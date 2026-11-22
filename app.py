@@ -2,6 +2,7 @@ import os
 import re
 import random
 import threading
+import traceback
 import math
 import time
 import json
@@ -740,6 +741,18 @@ def roll_artifact_direct(vk_id, name, plan, fact, report_id, started=None):
     """Бросок артефакта через нативное хранилище Google Sheets."""
     report_diag(report_id, "artifact_request_start", started, vk_id=str(vk_id))
     t0 = time.monotonic()
+    worker_id = threading.get_ident()
+    def log_stalled_roll():
+        frame = sys._current_frames().get(worker_id)
+        stack = traceback.extract_stack(frame) if frame is not None else ()
+        locations = ' > '.join(f'{os.path.basename(entry.filename)}:{entry.lineno}:{entry.name}'
+                               for entry in stack[-14:])
+        app.logger.warning('ARTIFACT_ROLL_STALLED report_id=%s elapsed=%.3fs stack=%s',
+                           report_id, time.monotonic() - t0, locations)
+
+    watchdog = threading.Timer(20, log_stalled_roll)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         result = digest_post({
             "action": "rollArtifact",
@@ -754,6 +767,8 @@ def roll_artifact_direct(vk_id, name, plan, fact, report_id, started=None):
         app.logger.warning('ARTIFACT_ROLL_ERROR report_id=%s error_type=%s elapsed=%.3fs',
                            report_id, type(exc).__name__, time.monotonic() - t0)
         raise
+    finally:
+        watchdog.cancel()
     report_diag(
         report_id, "artifact_request_done", started,
         request_seconds=round(time.monotonic() - t0, 3),
@@ -1995,12 +2010,40 @@ def recover_nov22_failed_reports():
             app.logger.exception('NOV22_REPORT_RECOVERY_FAILED surname=%s', surname)
 
 
+def audit_nov22_card_results():
+    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 8, tzinfo=ZoneInfo('UTC')):
+        return
+    from sheets_api import _session
+    from website_store import ARTIFACTS_ID, Sheets, log_artifact_result
+
+    report_ids = (
+        'vk-f54d2753cd8eb608764c2028d6fa2d017a7e789c',
+        'vk-a34cb56b01649cfc345feb4bf36a6a1807edf33a',
+        'vk-bc17b8c2d004329b01d9362c417f0288d1a42eb8',
+        'vk-e60777275eb6b9d9e92c7425103ba369690366bc',
+        'vk-f1c306fe1f73a8fd96514ff55cdc309a6d4872fe',
+    )
+    try:
+        with _session() as session:
+            rows = Sheets(session).values(ARTIFACTS_ID, ["'_ArtifactDrops'!A2:H"])[0]
+        records = {row[0]: json.loads(row[7]) for row in rows
+                   if len(row) >= 8 and row[0] in report_ids}
+        for report_id in report_ids:
+            if report_id in records:
+                log_artifact_result(report_id, records[report_id], replayed=True)
+            else:
+                app.logger.warning('ARTIFACT_ROLL_AUDIT_MISSING report_id=%s', report_id)
+        app.logger.warning('ARTIFACT_ROLL_AUDIT_COMPLETE')
+    except Exception:
+        app.logger.exception('ARTIFACT_ROLL_AUDIT_FAILED')
+
+
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
-        threading.Thread(target=recover_nov22_failed_reports,
-                         daemon=True, name='recover-nov22-failed-reports').start()
+        threading.Thread(target=audit_nov22_card_results,
+                         daemon=True, name='audit-nov22-card-results').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
