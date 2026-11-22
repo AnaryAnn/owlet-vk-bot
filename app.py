@@ -783,7 +783,7 @@ def recover_nov22_artifact_rolls():
 
 
 def send_report_confirmation_background(
-    peer_id, vk_id, name, plan, fact, report_id, artifact_eligible=False
+    peer_id, vk_id, name, plan, fact, report_id, artifact_eligible=False, random_id=None
 ):
     """
     Сразу подтверждает сохранение; награда отправляется отдельно.
@@ -801,7 +801,7 @@ def send_report_confirmation_background(
     )
     message = append_overplan_comment(message, plan, fact, report_id)
     report_diag(report_id, "vk_send_start", started, has_attachment=False)
-    vk_send_reliable(peer_id, message, attempts=6)
+    confirmation = vk_send_reliable(peer_id, message, attempts=6, random_id=random_id)
     report_diag(report_id, "vk_send_done", started)
     attachment = None
 
@@ -809,10 +809,12 @@ def send_report_confirmation_background(
     if artifact_eligible and report_id:
         try:
             roll = roll_artifact_direct(vk_id, name, plan, fact, report_id, started)
-            send_artifact_result(peer_id, vk_id, name, roll)
+            artifact_random_id = (random_id + 1) & 0x7fffffff or 1 if random_id is not None else None
+            send_artifact_result(peer_id, vk_id, name, roll, random_id=artifact_random_id)
         except Exception as exc:
             # Артефакт не должен задерживать или ломать подтверждение отчёта.
             print("ARTIFACT BACKGROUND ERROR:", repr(exc), flush=True)
+    return confirmation
 
 
 def vk_get_chat_members(peer_id):
@@ -1888,12 +1890,42 @@ def quest_tick_route():
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
+def recover_katya_report():
+    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 22, 8, tzinfo=ZoneInfo('UTC')):
+        return
+    event_id = '18254bc6afab32b90798d55cbcdde7dc71e5b981'
+    report_id = f'vk-{event_id}'
+    try:
+        participants = google_get({'action': 'participants'})['participants']
+        matches = [person for person in participants
+                   if set(person['name'].casefold().split()) in
+                   ({'катя', 'марусина'}, {'екатерина', 'марусина'})]
+        if len(matches) != 1 or not str(matches[0]['vkId']).isdigit():
+            raise ValueError('Cannot resolve report author uniquely')
+        user_id = int(matches[0]['vkId'])
+        result = google_save_report(user_id, 2, 2, report_id)
+        if not result.get('success'):
+            raise RuntimeError('Report save was not confirmed')
+        app.logger.warning('KATYA_REPORT_SAVED')
+        mark_event_async(event_id, user_id, STATS_PEER_ID)
+        random_id = (int.from_bytes(hashlib.sha256(
+            f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+        confirmation = send_report_confirmation_background(
+            STATS_PEER_ID, user_id, result['name'], 2, 2, report_id,
+            bool(result.get('artifactEligible')), random_id=random_id)
+        if confirmation is None:
+            raise RuntimeError('VK did not confirm the report notification')
+        app.logger.warning('KATYA_REPORT_CONFIRMED')
+    except Exception:
+        app.logger.exception('KATYA_REPORT_RECOVERY_FAILED')
+
+
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
-        threading.Thread(target=recover_nov22_artifact_rolls,
-                         daemon=True, name='artifact-recovery-nov22').start()
+        threading.Thread(target=recover_katya_report,
+                         daemon=True, name='recover-katya-report').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
     threading.Thread(target=admin_publish.prepare, args=(vk_send, VK_TOKEN), daemon=True, name='admin-publish-init').start()
 
