@@ -2,6 +2,8 @@
 from collections import Counter
 from io import BytesIO
 from math import ceil
+import logging
+import time
 from urllib.parse import urlsplit
 
 import requests
@@ -48,11 +50,26 @@ def render_distribution(records):
 
 
 def upload_chart(peer_id, token, chart):
+    deadline = time.monotonic() + 18
+
+    def post(stage, url, **kwargs):
+        for attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout(f'Stats chart deadline before {stage}')
+            try:
+                response = requests.post(url, timeout=(min(3, remaining), min(6, remaining)), **kwargs)
+                response.raise_for_status()
+                return response.json()
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                logging.warning('STATS_CHART_UPLOAD_NETWORK stage=%s attempt=%s type=%s',
+                                stage, attempt + 1, type(exc).__name__)
+                if attempt == 1:
+                    raise
+
     def vk(method, **params):
-        response = requests.post(f'https://api.vk.com/method/{method}',
-                                 data=dict(params, access_token=token, v='5.199'), timeout=(3, 6))
-        response.raise_for_status()
-        payload = response.json()
+        payload = post(method, f'https://api.vk.com/method/{method}',
+                       data=dict(params, access_token=token, v='5.199'))
         if 'error' in payload:
             raise RuntimeError(f"VK {method} error {payload['error'].get('error_code')}")
         return payload['response']
@@ -60,10 +77,7 @@ def upload_chart(peer_id, token, chart):
     url = vk('photos.getMessagesUploadServer', peer_id=peer_id)['upload_url']
     if urlsplit(url).scheme != 'https':
         raise ValueError('VK upload URL must use HTTPS')
-    response = requests.post(url, files={'photo': ('statistics.png', chart, 'image/png')},
-                             timeout=(3, 6))
-    response.raise_for_status()
-    uploaded = response.json()
+    uploaded = post('photo_upload', url, files={'photo': ('statistics.png', chart, 'image/png')})
     saved = vk('photos.saveMessagesPhoto', **{key: uploaded[key] for key in ('server', 'photo', 'hash')})[0]
     access_key = saved.get('access_key')
     return f"photo{saved['owner_id']}_{saved['id']}" + (f'_{access_key}' if access_key else '')
