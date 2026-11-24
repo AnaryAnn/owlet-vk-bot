@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import ssl
 import re
 import time
 import logging
@@ -93,14 +94,27 @@ def read_response(session, url, params=None, timeout=25):
         time.sleep(.3)
 
 
+_GOOGLE_TLS_CONTEXT = ssl.create_default_context(cafile=requests.certs.where())
+
+
+class GoogleTLSAdapter(requests.adapters.HTTPAdapter):
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host, pool = super().build_connection_pool_key_attributes(request, verify, cert)
+        if verify is True:
+            pool["ssl_context"] = _GOOGLE_TLS_CONTEXT
+        return host, pool
+
+
 class SheetsSession(AuthorizedSession):
     """Explicit service-account auth; never consult ambient netrc credentials."""
     def __init__(self, credentials):
         self._owned_auth_session = requests.Session()
         self._owned_auth_session.trust_env = False
+        self._owned_auth_session.mount('https://oauth2.googleapis.com/', GoogleTLSAdapter())
         super().__init__(credentials, auth_request=Request(self._owned_auth_session),
                          refresh_timeout=20)
         self.trust_env = False
+        self.mount('https://sheets.googleapis.com/', GoogleTLSAdapter())
 
     def close(self):
         try:

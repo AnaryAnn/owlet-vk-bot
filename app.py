@@ -1230,8 +1230,7 @@ def send_weekly_stats(peer_id):
     except Exception as exc:
         app.logger.warning("STATS_CHART_FAILED error_type=%s", type(exc).__name__)
     result = vk_send(peer_id, message, attachment=attachment)
-    if attachment:
-        app.logger.info("STATS_CHART_SENT peer_id=%s", peer_id)
+    app.logger.warning("WEEKLY_STATS_REPLY_SENT peer_id=%s chart=%s", peer_id, bool(attachment))
     return result
 
 
