@@ -208,7 +208,7 @@ def build_weekly_stats(stats=None):
     return (
         "📊 Статистика мохноногих сычиков\n"
         f"Неделя: {period}\n\n"
-        f"🦉 Активных сычиков: {active_count}\n"
+        f"🦉 Сычиков в чате: {active_count}\n"
         f"📝 Сообщили план и факт: {len(submitted)}\n"
         f"✅ Выполнили свой план: {completed}\n"
         f"🚀 Перевыполнили план: {exceeded}\n\n"
