@@ -104,6 +104,13 @@ class GoogleTLSAdapter(requests.adapters.HTTPAdapter):
             pool["ssl_context"] = _GOOGLE_TLS_CONTEXT
         return host, pool
 
+    def cert_verify(self, conn, url, verify, cert):
+        super().cert_verify(conn, url, verify, cert)
+        if verify is True:
+            # The shared context already contains the verified CA bundle.
+            conn.ca_certs = None
+            conn.ca_cert_dir = None
+
 
 class SheetsSession(AuthorizedSession):
     """Explicit service-account auth; never consult ambient netrc credentials."""

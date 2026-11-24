@@ -1650,7 +1650,7 @@ def process_vk_event(data):
                     ('изменён' if result.get('changed') else 'принят') + f": вариант {result['choice']}.")
             return Response("ok")
 
-        if SAVE_CHAT_MESSAGES:
+        if SAVE_CHAT_MESSAGES and candidate is None and not PLAIN_REPORT_RE.match(text):
             threading.Thread(
                 target=save_chat_message_background,
                 args=(dict(msg), event_id),
@@ -2087,8 +2087,50 @@ def run_pending_card_draws():
         time.sleep(30)
 
 
+def recover_nov24_evening_reports():
+    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 24, 18, tzinfo=ZoneInfo('UTC')):
+        return
+    time.sleep(8)
+    reports = (
+        ('8664f30d50aa3039186718ac093ddc841025fef8', 'Юлия Березина', 20, 0),
+        ('1ccc0823c63fb4ba4fe2e06375dbe69c278fe06f', 'Екатерина Степанова', 10, 1),
+    )
+    try:
+        participants = google_get({'action': 'participants'})['participants']
+    except Exception:
+        app.logger.exception('NOV24_EVENING_PARTICIPANTS_FAILED')
+        return
+    for index, (event_id, name, plan, fact) in enumerate(reports, 1):
+        try:
+            report_id = f'vk-{event_id}'
+            matches = {str(person['vkId']) for person in participants
+                       if str(person.get('vkId', '')).isdigit()
+                       and person['name'].casefold().split() == name.casefold().split()}
+            if len(matches) != 1:
+                raise ValueError('Cannot resolve report author uniquely')
+            user_id = int(matches.pop())
+            result = google_save_report(user_id, plan, fact, report_id, artifact_peer_id=STATS_PEER_ID)
+            if not result.get('success'):
+                raise RuntimeError('Report save was not confirmed')
+            app.logger.warning('NOV24_EVENING_SAVED index=%s', index)
+            random_id = (int.from_bytes(hashlib.sha256(
+                f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+            confirmation = send_report_confirmation_background(
+                STATS_PEER_ID, user_id, result['name'], plan, fact, report_id,
+                bool(result.get('artifactEligible') and not result.get('artifactPeerId')),
+                random_id=random_id)
+            if confirmation is None:
+                raise RuntimeError('VK did not confirm report notification')
+            mark_event_async(event_id, user_id, STATS_PEER_ID)
+            app.logger.warning('NOV24_EVENING_CONFIRMED index=%s', index)
+        except Exception:
+            app.logger.exception('NOV24_EVENING_FAILED index=%s', index)
+
+
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
+        threading.Thread(target=recover_nov24_evening_reports,
+                         daemon=True, name='recover-nov24-evening-reports').start()
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
         threading.Thread(target=run_pending_card_draws,
