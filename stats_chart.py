@@ -50,7 +50,7 @@ def render_distribution(records):
 
 
 def upload_chart(peer_id, token, chart):
-    deadline = time.monotonic() + 18
+    deadline = time.monotonic() + 24
 
     def post(stage, url, **kwargs):
         for attempt in range(2):
@@ -58,9 +58,19 @@ def upload_chart(peer_id, token, chart):
             if remaining <= 0:
                 raise requests.Timeout(f'Stats chart deadline before {stage}')
             try:
-                response = requests.post(url, timeout=(min(3, remaining), min(6, remaining)), **kwargs)
+                response = requests.post(url, timeout=(min(3, remaining), min(10, remaining)), **kwargs)
                 response.raise_for_status()
-                return response.json()
+                payload = response.json()
+                error = payload.get('error')
+                if isinstance(error, dict):
+                    code = error.get('error_code')
+                    logging.warning('STATS_CHART_UPLOAD_VK_ERROR stage=%s attempt=%s code=%s',
+                                    stage, attempt + 1, code)
+                    if code in (1, 6, 9, 10, 29) and attempt == 0:
+                        time.sleep(min(1, max(0, deadline - time.monotonic())))
+                        continue
+                    raise RuntimeError(f'VK {stage} error {code}')
+                return payload
             except (requests.Timeout, requests.ConnectionError) as exc:
                 logging.warning('STATS_CHART_UPLOAD_NETWORK stage=%s attempt=%s type=%s',
                                 stage, attempt + 1, type(exc).__name__)
@@ -70,8 +80,6 @@ def upload_chart(peer_id, token, chart):
     def vk(method, **params):
         payload = post(method, f'https://api.vk.com/method/{method}',
                        data=dict(params, access_token=token, v='5.199'))
-        if 'error' in payload:
-            raise RuntimeError(f"VK {method} error {payload['error'].get('error_code')}")
         return payload['response']
 
     url = vk('photos.getMessagesUploadServer', peer_id=peer_id)['upload_url']
