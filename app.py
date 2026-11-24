@@ -193,7 +193,14 @@ def build_weekly_stats():
     end = str(week.get("endDisplay") or week.get("end") or "")
     period = f"{start} - {end}" if start or end else "текущая неделя"
 
-    goal_text = _fmt_num(goal) if goal is not None else "не задана"
+    def total_with_average(total):
+        formatted = _fmt_num(total)
+        if active_count <= 0:
+            return formatted
+        average = f"{total / active_count:.1f}".replace(".", ",")
+        return f"{formatted} ({average} 🐭 на сычика)"
+
+    goal_text = total_with_average(goal) if goal is not None else "не задана"
     percent_text = f"{goal_percent:.1f}%".replace(".0%", "%") if goal_percent is not None else "нет цели"
     add_text = str(add_per_person) if add_per_person is not None else "не считается, пока не задана цель"
 
@@ -204,8 +211,8 @@ def build_weekly_stats():
         f"📝 Сообщили план и факт: {len(submitted)}\n"
         f"✅ Выполнили свой план: {completed}\n"
         f"🚀 Перевыполнили план: {exceeded}\n\n"
-        f"🐭 План: {_fmt_num(total_plan)}\n"
-        f"🐭 Факт: {_fmt_num(total_fact)}\n"
+        f"🐭 План: {total_with_average(total_plan)}\n"
+        f"🐭 Факт: {total_with_average(total_fact)}\n"
         f"🎯 Цель: {goal_text}\n"
         f"📈 Цель выполнена на: {percent_text}\n"
         f"➕ Нужно добавить каждому активному сычику: {add_text} 🐭"
