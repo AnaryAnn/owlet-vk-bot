@@ -216,7 +216,7 @@ def build_weekly_stats(stats=None):
         f"🐭 Факт: {total_with_average(total_fact)}\n"
         f"🎯 Цель: {goal_text}\n"
         f"📈 Цель выполнена на: {percent_text}\n"
-        f"➕ Нужно добавить каждому активному сычику: {add_text} 🐭"
+        f"➕ Нужно добавить каждому сычику: {add_text} 🐭"
     )
 
 def digest_post(payload, timeout=12):
