@@ -81,7 +81,8 @@ def records(rows, week):
         r = list(r) + [''] * max(0, 4 - len(r))
         if r[1] == '' and r[2] == '': continue
         result.append(dict(name=str(r[0]).strip(), plan=_number(r[1]), fact=_number(r[2]),
-            updated=str(r[3]), weekStart=week['start'], weekEnd=week['end']))
+            factEntered=bool(str(r[2]).strip()), updated=str(r[3]),
+            weekStart=week['start'], weekEnd=week['end']))
     return result
 
 

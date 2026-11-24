@@ -104,9 +104,10 @@ def _fmt_num(value):
     return str(int(n)) if n.is_integer() else f"{n:g}"
 
 
-def build_weekly_stats():
+def build_weekly_stats(stats=None):
     """Собирает статистику текущей недели через Google Sheets API."""
-    stats = google_get({"action": "stats"})
+    if stats is None:
+        stats = google_get({"action": "stats"})
     if not stats.get("success"):
         raise RuntimeError(stats.get("error", "Не удалось получить статистику"))
 
@@ -1216,12 +1217,29 @@ def generate_digest_background(peer_id):
             print("BACKGROUND DIGEST SEND ERROR:", repr(send_error))
 
 
+def send_weekly_stats(peer_id):
+    stats = google_get({"action": "stats"})
+    message = build_weekly_stats(stats)
+    attachment = None
+    try:
+        from stats_chart import render_distribution, upload_chart
+
+        chart = render_distribution(stats.get("currentRecords") or [])
+        if chart:
+            attachment = upload_chart(peer_id, VK_TOKEN, chart)
+    except Exception as exc:
+        app.logger.warning("STATS_CHART_FAILED error_type=%s", type(exc).__name__)
+    result = vk_send(peer_id, message, attachment=attachment)
+    if attachment:
+        app.logger.info("STATS_CHART_SENT peer_id=%s", peer_id)
+    return result
+
+
 def generate_scheduled_stats():
     peer_id = STATS_PEER_ID
     print("WEEKLY STATS START:", "peer_id=", peer_id, flush=True)
 
-    message = build_weekly_stats()
-    vk_result = vk_send(peer_id, message)
+    vk_result = send_weekly_stats(peer_id)
     try:
         send_milestones(google_get, split_vk_message)
     except Exception as exc:
@@ -1243,8 +1261,7 @@ def generate_scheduled_stats():
 
 def generate_stats_background(peer_id):
     try:
-        message = build_weekly_stats()
-        vk_send(peer_id, message)
+        send_weekly_stats(peer_id)
         try:
             send_milestones(google_get, split_vk_message)
         except Exception as exc:

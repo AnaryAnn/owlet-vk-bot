@@ -1,0 +1,69 @@
+"""Compact weekly distribution attachment for VK."""
+from collections import Counter
+from io import BytesIO
+from math import ceil
+from urllib.parse import urlsplit
+
+import requests
+from PIL import Image, ImageDraw, ImageFont
+
+
+def render_distribution(records):
+    counts = Counter(record['fact'] for record in records if record.get('factEntered'))
+    if not counts:
+        return None
+    buckets = sorted(counts.items())
+    image = Image.new('RGB', (1000, 390), '#ffffff')
+    draw = ImageDraw.Draw(image)
+    try:
+        title = ImageFont.truetype('DejaVuSans.ttf', 32)
+        label = ImageFont.truetype('DejaVuSans.ttf', 23)
+    except OSError:
+        title = ImageFont.load_default(size=32)
+        label = ImageFont.load_default(size=23)
+    draw.text((24, 12), 'Распределение факта', font=title, fill='#292720')
+    draw.text((74, 58), 'Сычиков', font=label, fill='#466f68')
+    left, right, top, bottom = 74, 968, 100, 301
+    tick = max(1, ceil(max(counts.values()) / 4))
+    for i in range(5):
+        y = bottom - i * (bottom - top) / 4
+        draw.line((left, y, right, y), fill='#dedbd2', width=2)
+        draw.text((left - 12, y), str(i * tick), font=label, fill='#466f68', anchor='rm')
+    slot = (right - left) / len(buckets)
+    bar_width = min(50, slot * .68)
+    max_label = max(draw.textlength(str(value), font=label) for value, _ in buckets)
+    spacing = max(1, ceil((max_label + 10) / slot))
+    for index, (value, count) in enumerate(buckets):
+        x = left + slot * (index + .5)
+        y = bottom - count / (4 * tick) * (bottom - top)
+        draw.rectangle((x - bar_width / 2, y, x + bar_width / 2, bottom), fill='#56857b')
+        if slot >= 36:
+            draw.text((x, y - 4), str(count), font=label, fill='#365b54', anchor='mb')
+        if index == len(buckets) - 1 or (index % spacing == 0 and len(buckets) - 1 - index >= spacing):
+            draw.text((x, bottom + 10), str(value), font=label, fill='#292720', anchor='mt')
+    draw.text(((left + right) / 2, 369), 'Мышей', font=label, fill='#756f64', anchor='mm')
+    output = BytesIO()
+    image.save(output, 'PNG', optimize=True)
+    return output.getvalue()
+
+
+def upload_chart(peer_id, token, chart):
+    def vk(method, **params):
+        response = requests.post(f'https://api.vk.com/method/{method}',
+                                 data=dict(params, access_token=token, v='5.199'), timeout=(3, 6))
+        response.raise_for_status()
+        payload = response.json()
+        if 'error' in payload:
+            raise RuntimeError(f"VK {method} error {payload['error'].get('error_code')}")
+        return payload['response']
+
+    url = vk('photos.getMessagesUploadServer', peer_id=peer_id)['upload_url']
+    if urlsplit(url).scheme != 'https':
+        raise ValueError('VK upload URL must use HTTPS')
+    response = requests.post(url, files={'photo': ('statistics.png', chart, 'image/png')},
+                             timeout=(3, 6))
+    response.raise_for_status()
+    uploaded = response.json()
+    saved = vk('photos.saveMessagesPhoto', **{key: uploaded[key] for key in ('server', 'photo', 'hash')})[0]
+    access_key = saved.get('access_key')
+    return f"photo{saved['owner_id']}_{saved['id']}" + (f'_{access_key}' if access_key else '')
