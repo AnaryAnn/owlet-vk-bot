@@ -2,9 +2,11 @@
 import hashlib
 import hmac
 import json
+import logging
 import random
 import re
 import time
+import threading
 from uuid import uuid4
 
 from native_treasury import PREFIX, count, read, valid_id
@@ -13,6 +15,8 @@ from website_store import ARTIFACTS_ID, RARITIES, Busy, Conflict, Sheets, Uncert
 
 RARITY_ORDER = [rarity for rarity, _, _ in RARITIES]
 PAGE_SIZE = 6
+_PENDING = set()
+_PENDING_LOCK = threading.Lock()
 
 
 def rarity_key(value):
@@ -112,6 +116,43 @@ def signature(secret, peer_id, card_id, cost, nonce, expiry):
     return hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()[:24]
 
 
+def complete_exchange(peer, card_id, cost, nonce, send):
+    with _PENDING_LOCK:
+        if nonce in _PENDING:
+            return
+        _PENDING.add(nonce)
+    try:
+        deadline = time.monotonic() + 300
+        notified = False
+        while True:
+            try:
+                reward = exchange(peer, card_id, cost, nonce)
+                break
+            except (Busy, Uncertain) as exc:
+                logging.warning('CARD_EXCHANGE_RETRY request_id=%s error=%s', nonce, type(exc).__name__)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    send(peer, 'Таблица всё ещё занята. Нажми ту же кнопку, чтобы проверить результат.', keyboard=menu())
+                    return
+                if not notified:
+                    try:
+                        send(peer, '🔄 Обмен подтверждён. Таблица занята, повторю попытку автоматически.',
+                             random_id=f'card-exchange-pending:{peer}:{nonce}')
+                    except Exception:
+                        logging.warning('CARD_EXCHANGE_PROGRESS_SEND_FAILED request_id=%s', nonce)
+                    notified = True
+                time.sleep(min(remaining, 6))
+        summary = f"🎁 Обмен завершён. Получена карточка №{reward['id']} «{reward['name']}» · {reward['rarity']}"
+        if not reward['photo'] and reward['image']:
+            summary += '\n' + reward['image']
+        send(peer, summary, attachment=reward['photo'] or None,
+             keyboard=menu(), random_id=f'card-exchange:{peer}:{nonce}')
+        logging.warning('CARD_EXCHANGE_DONE request_id=%s', nonce)
+    finally:
+        with _PENDING_LOCK:
+            _PENDING.discard(nonce)
+
+
 def handle_message(message, send, secret):
     peer = int(message['peer_id'])
     text = ' '.join(str(message.get('text') or '').casefold().split())
@@ -143,12 +184,7 @@ def handle_message(message, send, secret):
                     or not hmac.compare_digest(str(payload.get('sig', '')),
                                                signature(secret, peer, card_id, cost, nonce, expiry))):
                 raise ValueError('Подтверждение устарело. Открой «Обмен» заново.')
-            reward = exchange(peer, card_id, cost, nonce)
-            summary = f"🎁 Обмен завершён. Получена карточка №{reward['id']} «{reward['name']}» · {reward['rarity']}"
-            if not reward['photo'] and reward['image']:
-                summary += '\n' + reward['image']
-            send(peer, summary, attachment=reward['photo'] or None,
-                 keyboard=menu(), random_id=f'card-exchange:{peer}:{nonce}')
+            complete_exchange(peer, card_id, cost, nonce, send)
             return True
 
         cards = read('collection', str(peer))['personal']['cards']
