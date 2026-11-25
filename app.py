@@ -26,6 +26,7 @@ import native_storage
 from website_store import check_artifact_lock
 import quest_votes  # Callback dependencies are initialized before any worker starts.
 import card_exchange
+import personal_quests
 import admin_publish  # Initialize private-message handlers before worker threads.
 
 app = Flask(__name__)
@@ -1657,9 +1658,10 @@ def process_vk_event(data):
             if str(user_id) == str(peer_id) and ' '.join(text.casefold().split()) == 'моя коллекция':
                 send_personal_collection(int(peer_id), event_id)
             elif str(user_id) == str(peer_id):
-                if not handle_private_report(int(peer_id), text, msg, event_id):
-                    if not card_exchange.handle_message(msg, vk_send, VK_TOKEN):
-                        admin_publish.handle_message(msg, vk_send, VK_TOKEN)
+                if (not handle_private_report(int(peer_id), text, msg, event_id)
+                        and not personal_quests.handle_message(msg, vk_send)
+                        and not card_exchange.handle_message(msg, vk_send, VK_TOKEN)):
+                    admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             else:
                 admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             trace.step('private_handler_done')
@@ -2177,6 +2179,8 @@ if os.environ.get('RENDER') == 'true':
                          daemon=True, name='recover-nov24-evening-reports').start()
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
+        threading.Thread(target=personal_quests.worker, args=(vk_send,),
+                         daemon=True, name='personal-quests').start()
         threading.Thread(target=run_pending_card_draws,
                          daemon=True, name='pending-card-draws').start()
     threading.Thread(target=stats_startup.check, daemon=True, name='stats-startup-check').start()
