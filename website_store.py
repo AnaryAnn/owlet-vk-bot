@@ -31,9 +31,8 @@ STATS_LOCK_KEY = 'owlet_stats_write_v2'
 STATS_LOCK_BOOK = os.environ.get('STATS_LOCK_SPREADSHEET_ID') or os.environ.get('QUEST_SPREADSHEET_ID') or ARTIFACTS_ID
 BASE = 'https://sheets.googleapis.com/v4/spreadsheets/'
 _STATS_WRITERS = threading.RLock()
-_ARTIFACT_WRITERS = threading.Lock()
 _ARTIFACT_LOCK_OBSERVATIONS = {}
-_DIGEST_WRITERS = threading.Lock()
+_ARTIFACT_OBSERVATIONS_LOCK = threading.Lock()
 _DIGEST_LOCK_ID = 1937152403
 _DIGEST_LOCK_KEY = 'owlet_digest_write_v1'
 _DIGEST_LOCK_SWITCH_AT = time.monotonic() + 240
@@ -254,14 +253,8 @@ class Sheets:
                     yield
         elif book == ARTIFACTS_ID:
             separate_digest = digest and time.monotonic() >= _DIGEST_LOCK_SWITCH_AT
-            writers = _DIGEST_WRITERS if separate_digest else _ARTIFACT_WRITERS
-            if not writers.acquire(timeout=5):
-                raise ArtifactLockBusy('Таблица артефактов занята локальной записью')
-            try:
-                with self._locked_remote(book, recover_artifacts=True, digest=separate_digest):
-                    yield
-            finally:
-                writers.release()
+            with self._locked_remote(book, recover_artifacts=True, digest=separate_digest):
+                yield
         else:
             with self._locked_remote(book):
                 yield
@@ -271,16 +264,20 @@ class Sheets:
         owner = next((item.get('metadataValue') for item in metadata
                       if item.get('metadataId') == lock_id and item.get('metadataKey') == lock_key), None)
         if not owner:
-            _ARTIFACT_LOCK_OBSERVATIONS.pop(lock_id, None)
             return
         now = time.monotonic()
-        observation = _ARTIFACT_LOCK_OBSERVATIONS.get(lock_id)
-        if not observation or observation[0] != owner:
-            _ARTIFACT_LOCK_OBSERVATIONS[lock_id] = (owner, now)
-        elif now - observation[1] >= _ARTIFACT_STALE_AFTER:
-            self.batch(ARTIFACTS_ID, self._release_requests(lock_id, lock_key, owner))
-            _ARTIFACT_LOCK_OBSERVATIONS.pop(lock_id, None)
-            logging.warning('ARTIFACT_LOCK_STALE_OWNER_RELEASED lock=%s', lock_key)
+        with _ARTIFACT_OBSERVATIONS_LOCK:
+            observation = _ARTIFACT_LOCK_OBSERVATIONS.get(lock_id)
+            if not observation or observation[0] != owner:
+                _ARTIFACT_LOCK_OBSERVATIONS[lock_id] = (owner, now)
+                return
+            if now - observation[1] < _ARTIFACT_STALE_AFTER:
+                return
+        self.batch(ARTIFACTS_ID, self._release_requests(lock_id, lock_key, owner))
+        with _ARTIFACT_OBSERVATIONS_LOCK:
+            if _ARTIFACT_LOCK_OBSERVATIONS.get(lock_id) == observation:
+                _ARTIFACT_LOCK_OBSERVATIONS.pop(lock_id, None)
+        logging.warning('ARTIFACT_LOCK_STALE_OWNER_RELEASED lock=%s', lock_key)
 
     @staticmethod
     def _release_requests(lock_id, lock_key, owner):
