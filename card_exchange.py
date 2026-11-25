@@ -60,37 +60,49 @@ def exchange(peer_id, card_id, cost, request_id, rng=None):
                 ident = valid_id(row[2])
                 if ident is None:
                     continue
-                if ident in owned:
-                    raise Conflict('В коллекции есть повторяющиеся строки. Нужна проверка.')
-                owned[ident] = (index, list(row) + [''] * max(0, 8 - len(row)))
+                owned.setdefault(ident, []).append((index, list(row) + [''] * max(0, 8 - len(row))))
+
+            def quantity_of(rows):
+                quantities = [count(row[5]) for _, row in rows]
+                if any(value != int(value) for value in quantities):
+                    raise Conflict('В коллекции есть некорректное число копий.')
+                return sum(int(value) for value in quantities)
 
             source = cards.get(card_id)
-            if not source or card_id not in owned:
+            source_rows = owned.get(card_id, [])
+            if not source or not source_rows:
                 raise ValueError('Этой карточки уже нет в коллекции.')
-            source_index, source_row = owned[card_id]
-            quantity = count(source_row[5])
+            quantity = quantity_of(source_rows)
             target = target_rarity(rarity_key(source[1]), cost)
-            if not target or quantity < cost + 1 or quantity != int(quantity):
+            if not target or quantity < cost + 1:
                 raise ValueError('Этот вариант обмена уже недоступен. Открой меню обмена заново.')
             candidates = [ident for ident, card in cards.items() if rarity_key(card[1]) == target]
             if not candidates:
                 raise ValueError('В каталоге нет карточек нужной редкости.')
-            missing = [ident for ident in candidates if ident not in owned or not count(owned[ident][1][5])]
+            missing = [ident for ident in candidates if not any(
+                count(row[5]) for _, row in owned.get(ident, []))]
             reward_id = rng.choice(missing or candidates)
             reward = cards[reward_id]
             inventory_id = tabs['Инвентарь']['sheetId']
             now = stamp()
-            writes = [update(inventory_id, source_index, 5,
-                             [int(quantity) - cost + (reward_id == card_id), source_row[6], now])]
+            writes = []
+            remaining = cost - (reward_id == card_id)
+            for index, row in reversed(source_rows):
+                if not remaining:
+                    break
+                copies = int(count(row[5]))
+                spent = min(copies, remaining)
+                if spent:
+                    writes.append(update(inventory_id, index, 5, [copies - spent, row[6], now]))
+                    remaining -= spent
             if reward_id != card_id:
-                if reward_id in owned:
-                    index, row = owned[reward_id]
-                    reward_count = count(row[5])
-                    if reward_count != int(reward_count):
-                        raise Conflict('Некорректное число копий награды в коллекции.')
-                    writes.append(update(inventory_id, index, 5, [int(reward_count) + 1, row[6], now]))
+                reward_rows = owned.get(reward_id, [])
+                if reward_rows:
+                    quantity_of(reward_rows)
+                    index, row = reward_rows[0]
+                    writes.append(update(inventory_id, index, 5, [int(count(row[5])) + 1, row[6], now]))
                 else:
-                    writes.append(append(inventory_id, [owner, source_row[1], str(reward_id),
+                    writes.append(append(inventory_id, [owner, source_rows[0][1][1], str(reward_id),
                                                         str(reward[2]), str(reward[1]), 1, now, now]))
             photo = str(reward[4]).strip()
             image = str(reward[5]).strip()
