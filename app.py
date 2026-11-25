@@ -25,6 +25,7 @@ from report_trace import ReportTrace
 import native_storage
 from website_store import check_artifact_lock
 import quest_votes  # Callback dependencies are initialized before any worker starts.
+import card_exchange
 import admin_publish  # Initialize private-message handlers before worker threads.
 
 app = Flask(__name__)
@@ -608,11 +609,11 @@ def vk_send(peer_id, text, attachment=None, keyboard=None, random_id=None):
 def send_personal_collection(peer_id, event_id):
     from native_treasury import read
 
-    def send(text, part, attachment=None):
+    def send(text, part, attachment=None, keyboard=None):
         message_id = f'collection:{peer_id}:{event_id}:{part}' if event_id else None
         for attempt in range(3):
             try:
-                return vk_send(peer_id, text, attachment=attachment, random_id=message_id)
+                return vk_send(peer_id, text, attachment=attachment, keyboard=keyboard, random_id=message_id)
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == 2:
                     raise
@@ -633,7 +634,7 @@ def send_personal_collection(peer_id, event_id):
     message = f"🦉 Твоя коллекция\nУникальных карточек: {len(cards)} из {collection['total']}"
     if copies > len(cards):
         message += f'\nВсего с повторами: {copies:g}'
-    send(message, 'summary')
+    send(message, 'summary', keyboard=card_exchange.menu())
 
     for start in range(0, len(cards), 5):
         batch = cards[start:start + 5]
@@ -1616,7 +1617,7 @@ def process_vk_event(data):
             trace.step('private_handler_start')
             if str(user_id) == str(peer_id) and ' '.join(text.casefold().split()) == 'моя коллекция':
                 send_personal_collection(int(peer_id), event_id)
-            else:
+            elif str(user_id) != str(peer_id) or not card_exchange.handle_message(msg, vk_send, VK_TOKEN):
                 admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             trace.step('private_handler_done')
             return Response('ok')
