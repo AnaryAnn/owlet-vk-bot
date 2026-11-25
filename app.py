@@ -1585,6 +1585,45 @@ def process_quest_vote_callback(event):
     vote_feedback(user_id, peer_id, event_id, text)
 
 
+def handle_private_report(peer_id, text, message, event_id):
+    if ' '.join(text.casefold().split()) == 'внести данные':
+        vk_send(peer_id, '🦉 Пришли план и факт через запятую. Например: 30, 17.',
+                keyboard=card_exchange.menu())
+        return True
+    pair = PAIR_RE.fullmatch(text)
+    if not pair:
+        return False
+
+    message_id = message.get('conversation_message_id') or message.get('id')
+    if event_id:
+        report_id = f'vk-{event_id}'
+    elif message_id:
+        report_id = f'vk-dm-{peer_id}-{message_id}'
+    else:
+        vk_send(peer_id, '🦉 Не удалось определить номер сообщения. Пришли отчёт ещё раз.')
+        return True
+    plan, fact = map(int, pair.groups())
+    if max(plan, fact) > 1_000_000_000:
+        vk_send(peer_id, '🦉 Укажи числа от 0 до 1 000 000 000.')
+        return True
+    result = google_save_report(peer_id, plan, fact, report_id, artifact_peer_id=peer_id)
+    if not result.get('success'):
+        text = ('🦉 Твой VK-профиль пока не привязан к участнику охоты.'
+                if result.get('unknownVkUser') else
+                '🦉 Не удалось подтвердить сохранение отчёта. Пришли его ещё раз чуть позже.')
+        vk_send(peer_id, text, keyboard=card_exchange.menu())
+        return True
+
+    random_id = (int.from_bytes(hashlib.sha256(
+        f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
+    send_report_confirmation_background(peer_id, peer_id, result['name'], plan, fact,
+                                        report_id, random_id=random_id)
+    if event_id:
+        mark_event_async(event_id, peer_id, peer_id)
+    app.logger.warning('PRIVATE_REPORT_SAVED report_id=%s', report_id)
+    return True
+
+
 def process_vk_event(data):
     """Обработка события вне HTTP-запроса VK."""
     trace = None
@@ -1617,7 +1656,11 @@ def process_vk_event(data):
             trace.step('private_handler_start')
             if str(user_id) == str(peer_id) and ' '.join(text.casefold().split()) == 'моя коллекция':
                 send_personal_collection(int(peer_id), event_id)
-            elif str(user_id) != str(peer_id) or not card_exchange.handle_message(msg, vk_send, VK_TOKEN):
+            elif str(user_id) == str(peer_id):
+                if not handle_private_report(int(peer_id), text, msg, event_id):
+                    if not card_exchange.handle_message(msg, vk_send, VK_TOKEN):
+                        admin_publish.handle_message(msg, vk_send, VK_TOKEN)
+            else:
                 admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             trace.step('private_handler_done')
             return Response('ok')
