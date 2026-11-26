@@ -301,20 +301,19 @@ def handle_message(message, send):
                 raise ValueError('Игровая неделя сменилась. Открой «Квест» заново.')
             if action == 'cancel':
                 raise ValueError('Активного квеста нет.')
-            adjusted_week = payload.get('hemstitch_week') if action in ('offer', 'accept', 'hemstitch_apply') else None
+            adjusted_week = payload.get('hemstitch_week') if action in ('offer', 'accept') else None
+            if action == 'hemstitch_apply':
+                history = fact_history(snapshot, people[0])
+                adjusted_week = max(history, key=lambda start: (history[start], start), default=None)
+                if adjusted_week is None or history[adjusted_week] < HEMSTITCH_MICE:
+                    raise ValueError('Не нашёл отчёта с 110 мышами для вычета.')
             reference_fact, fact = calculate(snapshot, people[0], adjusted_week)
             if reference_fact is None:
                 raise ValueError('Чтобы взять квест, нужны отчёты хотя бы за две из шести завершённых недель.')
             if action == 'hemstitch':
-                eligible = [start for start, value in sorted(fact_history(snapshot, people[0]).items(), reverse=True)
-                            if value >= HEMSTITCH_MICE]
-                if not eligible:
-                    raise ValueError('За последние шесть недель нет отчёта с 110 мышами для вычета.')
-                inline('Вычесть 110 мышей за мережку из одного отчёта при расчёте нормы? '
-                       'Выбери неделю, в которой они были учтены.',
-                       [button(date.fromisoformat(start).strftime('Вычесть 110 · неделя с %d.%m'),
-                               pq='hemstitch_apply', week=week['start'], attempt=used, hemstitch_week=start)
-                        for start in eligible])
+                inline('Вычесть 110 мышей за мережку при расчёте нормы?',
+                       [button('Да, вычесть', pq='hemstitch_apply', week=week['start'], attempt=used),
+                        button('Квест')])
                 return True
             if action in ('offer', 'accept'):
                 level = payload.get('level')
@@ -333,7 +332,8 @@ def handle_message(message, send):
                     return True
             else:
                 base = max(reference_fact, fact)
-                inline(f'🦉 Выбери личный квест до {week["endDisplay"]}.\nОриентир по прошлым неделям: {reference_fact:g} · текущий: {fact:g}.',
+                adjusted_note = 'Вычел 110 мышей за мережку из расчёта нормы.\n\n' if adjusted_week else ''
+                inline(f'{adjusted_note}🦉 Выбери личный квест до {week["endDisplay"]}.\nОриентир по прошлым неделям: {reference_fact:g} · текущий: {fact:g}.',
                        [button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'], level=level, attempt=used,
                                hemstitch_week=adjusted_week)
                         for level, (label, increment, _) in LEVELS.items()] +
