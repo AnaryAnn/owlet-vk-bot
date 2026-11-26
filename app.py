@@ -1588,8 +1588,24 @@ def process_quest_vote_callback(event):
 
 def handle_private_report(peer_id, text, message, event_id):
     if ' '.join(text.casefold().split()) == 'внести данные':
-        vk_send(peer_id, '🦉 Пришли план и факт через запятую. Например: 30, 17.',
-                keyboard=card_exchange.menu())
+        prompt = '🦉 Пришли план и факт через запятую. Например: 30, 17.'
+        try:
+            stats = google_get({'action': 'stats'})
+            if not stats.get('success'):
+                raise RuntimeError('Could not read current week statistics')
+            names = {person['name'] for person in stats.get('participants', [])
+                     if str(person.get('vkId')) == str(peer_id)}
+            matches = [row for row in stats.get('currentRecords', []) if row['name'] in names]
+            if len(names) == 1 and len(matches) == 1:
+                record = matches[0]
+                plan = _fmt_num(record['plan'])
+                fact = _fmt_num(record['fact']) if record.get('factEntered', True) else '—'
+                prompt = f'🦉 Последние данные за эту неделю: план {plan}, факт {fact}.\n\n' + prompt
+            elif len(names) == 1 and not matches:
+                prompt = '🦉 За эту неделю данных пока нет.\n\n' + prompt
+        except Exception:
+            app.logger.warning('PRIVATE_REPORT_PREVIEW_FAILED', exc_info=True)
+        vk_send(peer_id, prompt, keyboard=card_exchange.menu())
         return True
     pair = PAIR_RE.fullmatch(text)
     if not pair:
