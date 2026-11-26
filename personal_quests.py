@@ -7,7 +7,7 @@ import re
 import time
 from datetime import date, timedelta
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
 
 from card_exchange import button, menu, rarity_key
 from native_storage import stats_get
@@ -24,23 +24,33 @@ HONESTY = ('ПРОТОКОЛ ЧЕСТНОГО ПРИКЛЮЧЕНИЯ! Перед
            'Квест предназначен для новых подвигов. Я тебе доверяю!')
 
 
-def fact_for(week, name):
-    facts = [row['fact'] for row in week.get('records', [])
-             if row.get('factEntered') and row['name'].casefold() == name.casefold()]
-    if len(facts) > 1:
+def report_for(week, name):
+    reports = [row for row in week.get('records', [])
+               if row.get('factEntered') and row['name'].casefold() == name.casefold()]
+    if len(reports) > 1:
         raise ValueError('В статистике несколько отчётов с твоим именем. Нужна проверка организатора.')
-    return facts[0] if facts else None
+    return reports[0] if reports else None
+
+
+def fact_for(week, name):
+    report = report_for(week, name)
+    return report['fact'] if report else None
 
 
 def calculate(snapshot, name):
     current = date.fromisoformat(snapshot['currentWeek']['start'])
     cutoff = (current - timedelta(weeks=6)).isoformat()
-    history = [fact_for(w, name) for w in snapshot['weeks'] if cutoff <= w['weekStart'] < current.isoformat()]
-    history = [fact for fact in history if fact is not None]
+    history = [report for week in snapshot['weeks']
+               if cutoff <= week['weekStart'] < current.isoformat()
+               if (report := report_for(week, name)) is not None]
     current_record = next((w for w in snapshot['weeks'] if w['weekStart'] == current.isoformat()), {})
     fact = fact_for(current_record, name) or 0
-    median_fact = math.ceil(median(history)) if len(history) >= 2 else None
-    return median_fact, fact
+    if len(history) < 2:
+        return None, fact
+    median_fact = median(report['fact'] for report in history)
+    plans = [report['plan'] for report in history if report.get('planEntered')]
+    reference_fact = math.ceil((2 * median_fact + mean(plans)) / 3 if plans else median_fact)
+    return reference_fact, fact
 
 
 def rows(api):
@@ -59,7 +69,7 @@ def choose_story(level, recent):
     return random.choice([key for key in choices if key not in recent] or choices)
 
 
-def save_choice(peer, week, payload, name, median_fact, fact):
+def save_choice(peer, week, payload, name, reference_fact, fact):
     key = f"{peer}:{week['start']}"
     with _session(write=True) as session:
         api = Sheets(session)
@@ -81,15 +91,15 @@ def save_choice(peer, week, payload, name, median_fact, fact):
             if found:
                 return found[1]
             level = payload.get('level')
-            if level not in LEVELS or median_fact is None:
+            if level not in LEVELS or reference_fact is None:
                 raise ValueError('Квест недоступен. Открой меню заново.')
             _, increment, _ = LEVELS[level]
-            target = max(median_fact, fact) + increment
+            target = max(reference_fact, fact) + increment
             if payload.get('target') != target:
                 return None
             recent = [q['story'] for _, _, q in records if q['peer'] == peer][-3:]
             quest = dict(peer=peer, name=name, week=week['start'], end=week['end'],
-                         level=level, story=choose_story(level, recent), median_fact=median_fact,
+                         level=level, story=choose_story(level, recent), reference_fact=reference_fact,
                          accepted_fact=fact, target=target, status='active', accepted_at=stamp())
             tab = api.ensure_tab(ARTIFACTS_ID, TAB, ['quest_key', 'quest_json'])
             api.batch(ARTIFACTS_ID, [append(tab, [key, encoded(quest)])])
@@ -260,17 +270,17 @@ def handle_message(message, send):
             snapshot = read_stats_history()
             if snapshot['currentWeek']['start'] != week['start']:
                 raise ValueError('Игровая неделя сменилась. Открой «Квест» заново.')
-            median_fact, fact = calculate(snapshot, people[0])
-            if median_fact is None:
+            reference_fact, fact = calculate(snapshot, people[0])
+            if reference_fact is None:
                 raise ValueError('Чтобы взять квест, нужны отчёты хотя бы за две из шести завершённых недель.')
             if action in ('offer', 'accept'):
                 level = payload.get('level')
                 if level not in LEVELS:
                     raise ValueError('Выбери сложность в меню «Квест».')
                 label, increment, rarity = LEVELS[level]
-                target = max(median_fact, fact) + increment
+                target = max(reference_fact, fact) + increment
                 if action == 'accept':
-                    quest = save_choice(peer, week, payload, people[0], median_fact, fact)
+                    quest = save_choice(peer, week, payload, people[0], reference_fact, fact)
                 if not quest:
                     changed = 'Цель обновилась. Проверь её и подтверди снова.\n\n' if action == 'accept' else ''
                     inline(f'{changed}{label} квест · {target:g} мышей до {week["endDisplay"]}\n'
@@ -278,8 +288,8 @@ def handle_message(message, send):
                            [button('Принять квест', pq='accept', week=week['start'], level=level, target=target)])
                     return True
             else:
-                base = max(median_fact, fact)
-                inline(f'🦉 Выбери личный квест до {week["endDisplay"]}.\nМедианный факт: {median_fact:g} · текущий: {fact:g}.',
+                base = max(reference_fact, fact)
+                inline(f'🦉 Выбери личный квест до {week["endDisplay"]}.\nОриентир по прошлым неделям: {reference_fact:g} · текущий: {fact:g}.',
                        [button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'], level=level)
                         for level, (label, increment, _) in LEVELS.items()])
                 return True
