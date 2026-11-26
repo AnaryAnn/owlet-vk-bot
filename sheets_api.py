@@ -262,7 +262,8 @@ def read_stats_history():
                     if not str(plan).strip() and not str(fact).strip():
                         continue
                     records.append(dict(name=str(row[0]).strip(), plan=_number(plan), fact=_number(fact),
-                        factEntered=bool(str(fact).strip()), weekStart=week['weekStart'], weekEnd=week['weekEnd'],
+                        planEntered=bool(str(plan).strip()), factEntered=bool(str(fact).strip()),
+                        weekStart=week['weekStart'], weekEnd=week['weekEnd'],
                         updated=str(row[3]) if len(row) > 3 else ''))
                 week['records'] = records
                 week['totalMice'] = sum(r['fact'] for r in records)
