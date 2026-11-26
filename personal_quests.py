@@ -16,6 +16,8 @@ from sheets_api import _session, current_week, read_stats_history
 from website_store import ARTIFACTS_ID, Busy, Sheets, Uncertain, append, stamp, update
 
 TAB = '_PersonalQuests'
+MAX_CANCELLATIONS = 2
+HEMSTITCH_MICE = 110
 RANGE = f"'{TAB}'!A2:B"
 LEVELS = {'E': ('Лёгкий', 2, 'обычный'), 'M': ('Средний', 5, 'необычный'),
           'H': ('Сложный', 10, 'редкий')}
@@ -37,20 +39,33 @@ def fact_for(week, name):
     return report['fact'] if report else None
 
 
-def calculate(snapshot, name):
+def fact_history(snapshot, name):
     current = date.fromisoformat(snapshot['currentWeek']['start'])
     cutoff = (current - timedelta(weeks=6)).isoformat()
-    history = [report for week in snapshot['weeks']
-               if cutoff <= week['weekStart'] < current.isoformat()
-               if (report := report_for(week, name)) is not None]
-    current_record = next((w for w in snapshot['weeks'] if w['weekStart'] == current.isoformat()), {})
+    return {week['weekStart']: report['fact'] for week in snapshot['weeks']
+            if cutoff <= week['weekStart'] < current.isoformat()
+            if (report := report_for(week, name)) is not None}
+
+
+def calculate(snapshot, name, hemstitch_week=None):
+    current = snapshot['currentWeek']['start']
+    history = fact_history(snapshot, name)
+    if hemstitch_week is not None:
+        if history.get(hemstitch_week, 0) < HEMSTITCH_MICE:
+            raise ValueError('В выбранной неделе нет 110 мышей для этой поправки.')
+        history[hemstitch_week] -= HEMSTITCH_MICE
+    current_record = next((w for w in snapshot['weeks'] if w['weekStart'] == current), {})
     fact = fact_for(current_record, name) or 0
     if len(history) < 2:
         return None, fact
-    median_fact = median(report['fact'] for report in history)
-    plans = [report['plan'] for report in history if report.get('planEntered')]
-    reference_fact = math.ceil((2 * median_fact + mean(plans)) / 3 if plans else median_fact)
-    return reference_fact, fact
+    facts = history.values()
+    return math.ceil((mean(facts) + median(facts)) / 2), fact
+
+
+def cancellations(quest):
+    if quest is None:
+        return 0
+    return quest.get('cancellations', int(quest['status'] == 'cancelled'))
 
 
 def rows(api):
@@ -78,18 +93,25 @@ def save_choice(peer, week, payload, name, reference_fact, fact):
                 raise ValueError('Игровая неделя уже сменилась. Открой «Квест» заново.')
             records = rows(api)
             found = next(((index, q) for index, ident, q in records if ident == key), None)
+            existing = found[1] if found else None
+            used = cancellations(existing)
+            if payload.get('attempt', 0) != used:
+                raise ValueError('Эта кнопка устарела. Открой «Квест» заново.')
             if payload['pq'] == 'cancel':
                 if not found:
                     raise ValueError('Активного квеста нет.')
                 index, quest = found
                 if quest['status'] == 'active':
+                    if used >= MAX_CANCELLATIONS:
+                        raise ValueError('Две отмены на этой неделе уже использованы.')
+                    quest['cancellations'] = used + 1
                     quest['status'] = 'cancelled'
                     quest['finished_at'] = stamp()
                     tab = api.tabs(ARTIFACTS_ID)[TAB]['sheetId']
                     api.batch(ARTIFACTS_ID, [update(tab, index, 1, [encoded(quest)])])
                 return quest
-            if found:
-                return found[1]
+            if existing and existing['status'] != 'cancelled':
+                return existing
             level = payload.get('level')
             if level not in LEVELS or reference_fact is None:
                 raise ValueError('Квест недоступен. Открой меню заново.')
@@ -100,9 +122,11 @@ def save_choice(peer, week, payload, name, reference_fact, fact):
             recent = [q['story'] for _, _, q in records if q['peer'] == peer][-3:]
             quest = dict(peer=peer, name=name, week=week['start'], end=week['end'],
                          level=level, story=choose_story(level, recent), reference_fact=reference_fact,
-                         accepted_fact=fact, target=target, status='active', accepted_at=stamp())
+                         accepted_fact=fact, target=target, status='active', accepted_at=stamp(),
+                         cancellations=used, hemstitch_week=payload.get('hemstitch_week'))
             tab = api.ensure_tab(ARTIFACTS_ID, TAB, ['quest_key', 'quest_json'])
-            api.batch(ARTIFACTS_ID, [append(tab, [key, encoded(quest)])])
+            write = update(tab, found[0], 1, [encoded(quest)]) if found else append(tab, [key, encoded(quest)])
+            api.batch(ARTIFACTS_ID, [write])
             return quest
 
 
@@ -232,11 +256,12 @@ def handle_message(message, send):
         payload = {}
     action = payload.get('pq')
     text = ' '.join(str(message.get('text') or '').casefold().split())
-    if text != 'квест' and action not in ('offer', 'accept', 'cancel_offer', 'cancel'):
+    if text != 'квест' and action not in ('offer', 'accept', 'cancel_offer', 'cancel', 'hemstitch', 'hemstitch_apply'):
         return False
 
     def inline(text, buttons):
-        send(peer, text, keyboard={'inline': True, 'buttons': [[item] for item in buttons]})
+        keyboard = {'inline': True, 'buttons': [[item] for item in buttons]} if buttons else None
+        send(peer, text, keyboard=keyboard)
 
     try:
         week = current_week()
@@ -245,18 +270,22 @@ def handle_message(message, send):
         key = f"{peer}:{week['start']}"
         with _session() as session:
             quest = next((q for _, ident, q in rows(Sheets(session)) if ident == key), None)
+        used = cancellations(quest)
         if quest and quest['status'] == 'cancelled':
-            send(peer, '🦉 Квест этой недели отменён. Следующий можно взять на новой неделе.', keyboard=menu())
-            return True
+            quest = None
+        if action in ('offer', 'accept', 'cancel_offer', 'cancel', 'hemstitch', 'hemstitch_apply') and payload.get('attempt', 0) != used:
+            raise ValueError('Эта кнопка устарела. Открой «Квест» заново.')
         if quest and action == 'cancel_offer':
-            inline('Отменить квест? Другой в этой неделе взять не получится.',
-                   [button('Да, отменить квест', pq='cancel', week=week['start'])])
+            if used >= MAX_CANCELLATIONS:
+                raise ValueError('Две отмены на этой неделе уже использованы.')
+            inline(f'Отменить квест и выбрать новый? Осталось отмен: {MAX_CANCELLATIONS - used}.',
+                   [button('Да, отменить квест', pq='cancel', week=week['start'], attempt=used)])
             return True
 
         if quest:
             if action == 'cancel':
                 save_choice(peer, week, payload, quest['name'], None, 0)
-                send(peer, '🦉 Квест отменён. Я буду ждать тебя на следующей неделе.', keyboard=menu())
+                send(peer, '🦉 Квест отменён. Нажми «Квест», чтобы выбрать новый.', keyboard=menu())
                 return True
             snapshot = read_stats_history()
             current_data = next((w for w in snapshot['weeks'] if w['weekStart'] == week['start']), {})
@@ -270,9 +299,23 @@ def handle_message(message, send):
             snapshot = read_stats_history()
             if snapshot['currentWeek']['start'] != week['start']:
                 raise ValueError('Игровая неделя сменилась. Открой «Квест» заново.')
-            reference_fact, fact = calculate(snapshot, people[0])
+            if action == 'cancel':
+                raise ValueError('Активного квеста нет.')
+            adjusted_week = payload.get('hemstitch_week') if action in ('offer', 'accept', 'hemstitch_apply') else None
+            reference_fact, fact = calculate(snapshot, people[0], adjusted_week)
             if reference_fact is None:
                 raise ValueError('Чтобы взять квест, нужны отчёты хотя бы за две из шести завершённых недель.')
+            if action == 'hemstitch':
+                eligible = [start for start, value in sorted(fact_history(snapshot, people[0]).items(), reverse=True)
+                            if value >= HEMSTITCH_MICE]
+                if not eligible:
+                    raise ValueError('За последние шесть недель нет отчёта с 110 мышами для вычета.')
+                inline('Вычесть 110 мышей за мережку из одного отчёта при расчёте нормы? '
+                       'Выбери неделю, в которой они были учтены.',
+                       [button(date.fromisoformat(start).strftime('Вычесть 110 · неделя с %d.%m'),
+                               pq='hemstitch_apply', week=week['start'], attempt=used, hemstitch_week=start)
+                        for start in eligible])
+                return True
             if action in ('offer', 'accept'):
                 level = payload.get('level')
                 if level not in LEVELS:
@@ -285,13 +328,16 @@ def handle_message(message, send):
                     changed = 'Цель обновилась. Проверь её и подтверди снова.\n\n' if action == 'accept' else ''
                     inline(f'{changed}{label} квест · {target:g} мышей до {week["endDisplay"]}\n'
                            f'Награда за успех: карточка · {rarity}.\n\n{HONESTY}',
-                           [button('Принять квест', pq='accept', week=week['start'], level=level, target=target)])
+                           [button('Принять квест', pq='accept', week=week['start'], level=level, target=target,
+                                   attempt=used, hemstitch_week=adjusted_week)])
                     return True
             else:
                 base = max(reference_fact, fact)
                 inline(f'🦉 Выбери личный квест до {week["endDisplay"]}.\nОриентир по прошлым неделям: {reference_fact:g} · текущий: {fact:g}.',
-                       [button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'], level=level)
-                        for level, (label, increment, _) in LEVELS.items()])
+                       [button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'], level=level, attempt=used,
+                               hemstitch_week=adjusted_week)
+                        for level, (label, increment, _) in LEVELS.items()] +
+                       [button('Это слишком сложно!', pq='hemstitch', week=week['start'], attempt=used)])
                 return True
 
         story = CATALOG[quest['story']]
@@ -299,7 +345,8 @@ def handle_message(message, send):
         inline(f"🦉 «{story['title']}»\n{story['intro']}\n\n"
                f"Твоя цель до конца недели: {quest['target']:g} мышей.\n"
                f"Прогресс: {fact:g} из {quest['target']:g} ({progress}%).",
-               [button('Отменить квест', pq='cancel_offer', week=week['start'])])
+               [button('Отменить квест', pq='cancel_offer', week=week['start'], attempt=used)]
+               if used < MAX_CANCELLATIONS else [])
     except ValueError as exc:
         send(peer, f'🦉 {exc}', keyboard=menu())
     except (Busy, Uncertain):
