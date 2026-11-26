@@ -401,23 +401,18 @@ def build_digest(messages):
             },
         ],
         "temperature": 0.8,
-        "max_tokens": 2400,
+        "max_tokens": 4096,
     }
 
-    # Автомаршрутизатор выбирает доступную бесплатную модель; следующие две
-    # используются, если ответ оказался некорректным или модель недоступна.
-    # При исчерпании суточной квоты OpenRouter ни одна бесплатная модель
-    # не поможет: в этом случае ниже сработает локальная подборка цитат.
-    models = [
-        "openrouter/free",
-        "dots-studio/dots-3-note-preview-20260813:free",
-        "nvidia/nemotron-3-super-120b-a12b:free",
-    ]
+    # The router covers availability changes without keeping stale free model IDs.
+    models = ("google/gemma-4-26b-a4b-it:free", "openrouter/free")
     last_error = None
 
     for attempt, model in enumerate(models, start=1):
         try:
-            request_body["model"] = model
+            body = dict(request_body, model=model)
+            if model != "openrouter/free":
+                body["reasoning"] = {"effort": "none"}
             print(
                 f"OPENROUTER ATTEMPT {attempt}/{len(models)} model={model}",
                 flush=True,
@@ -429,7 +424,7 @@ def build_digest(messages):
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json=request_body,
+                json=body,
                 timeout=12,
             )
 
