@@ -333,11 +333,15 @@ def handle_message(message, send):
             else:
                 base = max(reference_fact, fact)
                 adjusted_note = 'Вычел 110 мышей за мережку из расчёта нормы.\n\n' if adjusted_week else ''
+                buttons = [
+                    button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'],
+                           level=level, attempt=used, hemstitch_week=adjusted_week)
+                    for level, (label, increment, _) in LEVELS.items()
+                ]
+                if not adjusted_week:
+                    buttons.append(button('Это слишком сложно!', pq='hemstitch', week=week['start'], attempt=used))
                 inline(f'{adjusted_note}🦉 Выбери личный квест до {week["endDisplay"]}.\nОриентир по прошлым неделям: {reference_fact:g} · текущий: {fact:g}.',
-                       [button(f'{label} · {base + increment:g} мышей', pq='offer', week=week['start'], level=level, attempt=used,
-                               hemstitch_week=adjusted_week)
-                        for level, (label, increment, _) in LEVELS.items()] +
-                       [button('Это слишком сложно!', pq='hemstitch', week=week['start'], attempt=used)])
+                       buttons)
                 return True
 
         story = CATALOG[quest['story']]
