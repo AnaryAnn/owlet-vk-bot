@@ -1732,9 +1732,9 @@ def process_vk_event(data):
             elif str(user_id) == str(peer_id):
                 if ' '.join(text.casefold().split()) == 'мой прогресс':
                     send_private_progress(int(peer_id), event_id)
-                elif (not handle_private_report(int(peer_id), text, msg, event_id)
+                elif (not card_gifts.handle_message(msg, event_id, vk_send, VK_TOKEN)
+                        and not handle_private_report(int(peer_id), text, msg, event_id)
                         and not personal_quests.handle_message(msg, vk_send)
-                        and not card_gifts.handle_message(msg, event_id, vk_send, VK_TOKEN)
                         and not card_exchange.handle_message(msg, vk_send, VK_TOKEN)):
                     admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             else:
