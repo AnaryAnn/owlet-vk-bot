@@ -89,3 +89,44 @@ def upload_chart(peer_id, token, chart):
     saved = vk('photos.saveMessagesPhoto', **{key: uploaded[key] for key in ('server', 'photo', 'hash')})[0]
     access_key = saved.get('access_key')
     return f"photo{saved['owner_id']}_{saved['id']}" + (f'_{access_key}' if access_key else '')
+
+
+def render_personal_progress(data):
+    image = Image.new('RGB', (800, 340), '#ffffff')
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype('DejaVuSans.ttf', 21)
+    except OSError:
+        font = ImageFont.load_default(size=21)
+    draw.text((28, 16), 'Мой прогресс', font=font, fill='#292720')
+    left, right, top, bottom = 76, 760, 70, 270
+    tick = max(1, ceil(max(value for _, plan, fact in data
+                           for value in (plan, fact) if value is not None) / 4))
+    for i in range(5):
+        y = bottom - i * (bottom - top) / 4
+        draw.line((left, y, right, y), fill='#dedbd2', width=2)
+        draw.text((left - 10, y), str(i * tick), font=font, fill='#466f68', anchor='rm')
+    slot = (right - left) / len(data)
+    series = [(1, 'План', '#56857b'), (2, 'Факт', '#b15a38')]
+    for column, label, color in series:
+        previous = None
+        for index, week in enumerate(data):
+            value = week[column]
+            if value is None:
+                previous = None
+                continue
+            x = left + slot * (index + .5)
+            y = bottom - value / (tick * 4) * (bottom - top)
+            if previous:
+                draw.line((*previous, x, y), fill=color, width=4)
+            draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
+            previous = (x, y)
+        x = 480 if column == 1 else 615
+        draw.line((x, 31, x + 25, 31), fill=color, width=4)
+        draw.text((x + 34, 31), label, fill='#292720', font=font, anchor='lm')
+    for index, (label, _, _) in enumerate(data):
+        x = left + slot * (index + .5)
+        draw.text((x, bottom + 14), label, font=font, fill='#292720', anchor='mt')
+    output = BytesIO()
+    image.save(output, 'PNG', optimize=True)
+    return output.getvalue()

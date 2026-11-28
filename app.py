@@ -1636,6 +1636,65 @@ def handle_private_report(peer_id, text, message, event_id):
     return True
 
 
+def send_private_progress(peer_id, event_id):
+    from datetime import date
+    from sheets_api import read_stats_history
+    from personal_quests import calculate
+
+    random_id = f'private-progress:{peer_id}:{event_id}' if event_id else None
+    try:
+        participants = google_get({'action': 'participants'})['participants']
+        names = {person['name'] for person in participants
+                 if str(person.get('vkId')) == str(peer_id)}
+        if len(names) != 1:
+            vk_send(peer_id, '🦉 Для просмотра прогресса привяжи свой профиль VK к участнику охоты.',
+                    keyboard=card_exchange.menu(), random_id=random_id)
+            return
+        name = names.pop()
+        snapshot = read_stats_history()
+        current = date.fromisoformat(snapshot['currentWeek']['start'])
+        weeks = {week['weekStart']: week for week in snapshot['weeks']}
+        data = []
+        lines = ['📈 Мой прогресс · 6 игровых недель']
+        for offset in range(5, -1, -1):
+            start = current - timedelta(weeks=offset)
+            label = start.strftime('%d.%m')
+            records = weeks.get(start.isoformat(), {}).get('records', [])
+            matches = [record for record in records if record['name'].casefold() == name.casefold()]
+            if len(matches) > 1:
+                raise ValueError('More than one weekly report matches the participant')
+            report = matches[0] if matches else {}
+            plan = report.get('plan') if report.get('planEntered') else None
+            fact = report.get('fact') if report.get('factEntered') else None
+            data.append((label, plan, fact))
+            suffix = ' (текущая)' if offset == 0 else ''
+            if plan is None and fact is None:
+                lines.append(f'{label}{suffix} · нет отчёта')
+            else:
+                plan_text = '—' if plan is None else _fmt_num(plan)
+                fact_text = '—' if fact is None else _fmt_num(fact)
+                lines.append(f'{label}{suffix} · план {plan_text}, факт {fact_text}')
+        reference, _ = calculate(snapshot, name)
+        if reference is not None:
+            lines.append(f'\nОриентир для нового квеста: {reference} 🐭 '
+                         '(среднее и медиана факта за завершённые недели, до поправки на мережку).')
+    except Exception:
+        app.logger.exception('PRIVATE_PROGRESS_READ_FAILED')
+        vk_send(peer_id, '🦉 Не удалось загрузить прогресс. Попробуй чуть позже.',
+                keyboard=card_exchange.menu(), random_id=random_id)
+        return
+
+    attachment = None
+    if any(plan is not None or fact is not None for _, plan, fact in data):
+        try:
+            from stats_chart import render_personal_progress, upload_chart
+            attachment = upload_chart(peer_id, VK_TOKEN, render_personal_progress(data))
+        except Exception as exc:
+            app.logger.warning('PRIVATE_PROGRESS_CHART_FAILED type=%s', type(exc).__name__)
+    vk_send(peer_id, '\n'.join(lines), attachment=attachment,
+            keyboard=card_exchange.menu(), random_id=random_id)
+
+
 def process_vk_event(data):
     """Обработка события вне HTTP-запроса VK."""
     trace = None
@@ -1669,7 +1728,9 @@ def process_vk_event(data):
             if str(user_id) == str(peer_id) and ' '.join(text.casefold().split()) == 'моя коллекция':
                 send_personal_collection(int(peer_id), event_id)
             elif str(user_id) == str(peer_id):
-                if (not handle_private_report(int(peer_id), text, msg, event_id)
+                if ' '.join(text.casefold().split()) == 'мой прогресс':
+                    send_private_progress(int(peer_id), event_id)
+                elif (not handle_private_report(int(peer_id), text, msg, event_id)
                         and not personal_quests.handle_message(msg, vk_send)
                         and not card_exchange.handle_message(msg, vk_send, VK_TOKEN)):
                     admin_publish.handle_message(msg, vk_send, VK_TOKEN)
