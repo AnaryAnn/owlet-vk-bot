@@ -4,7 +4,6 @@ import hmac
 import json
 import logging
 import re
-import time
 
 from card_exchange import button, menu
 from native_storage import stats_get
@@ -13,7 +12,6 @@ from sheets_api import _session
 from website_store import ARTIFACTS_ID, Busy, Sheets, Uncertain, append, stamp, update
 
 TAB = '_CardGifts'
-GIFT_TTL = 24 * 60 * 60
 CODE_RE = re.compile(r'(?:подарок\s+)?(СЫЧ-[A-F0-9]{20})', re.IGNORECASE)
 
 
@@ -64,7 +62,7 @@ def make_gift(owner, card, code):
             inventory = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H"])[0]
             if sum(quantities(inventory_rows(inventory, owner, card))) < 2:
                 raise ValueError('Для подарка нужны хотя бы две копии карточки.')
-            gift = dict(owner=owner, card=card, expires=int(time.time()) + GIFT_TTL)
+            gift = dict(owner=owner, card=card)
             tab = api.ensure_tab(ARTIFACTS_ID, TAB, ['code_hash', 'gift_json'])
             api.batch(ARTIFACTS_ID, [append(tab, [digest, json.dumps(gift)])])
             return gift
@@ -79,8 +77,6 @@ def check_gift(found, peer):
     recipient = gift.get('recipient')
     if recipient is not None and recipient != peer:
         raise ValueError('Промокод уже использован.')
-    if recipient is None and gift['expires'] <= time.time():
-        raise ValueError('Срок действия промокода истёк.')
     return gift
 
 
@@ -152,10 +148,10 @@ def handle_message(message, event_id, send, secret):
                 raise ValueError('Не удалось определить номер карточки или сообщения.')
             code = gift_code(secret, peer, ident)
             gift = make_gift(peer, card, code)
-            if gift.get('recipient') or gift['expires'] <= time.time():
+            if gift.get('recipient') is not None:
                 raise ValueError('Этот промокод уже закрыт. Создай новый подарок.')
             send(peer, f'🎁 Одноразовый промокод для карточки №{card}:\n{code}\n\n'
-                       'Перешли его получателю. Код действует 24 часа. Карточка перейдёт после подтверждения.',
+                       'Перешли его получателю. Карточка перейдёт после подтверждения.',
                  keyboard=menu(), random_id=f'gift-create:{peer}:{ident}')
         elif action == 'redeem':
             digest = payload.get('code_hash')
