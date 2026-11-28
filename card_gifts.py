@@ -4,6 +4,8 @@ import hmac
 import json
 import logging
 import re
+import time
+from threading import Lock
 
 from card_exchange import button, menu
 from native_storage import stats_get
@@ -12,6 +14,9 @@ from sheets_api import _session
 from website_store import ARTIFACTS_ID, Busy, Sheets, Uncertain, append, stamp, update
 
 TAB = '_CardGifts'
+_WAITING_FOR_CODE = {}
+_WAITING_LOCK = Lock()
+_MENU_COMMANDS = {'меню', 'начать', 'моя коллекция', 'обмен', 'внести данные', 'квест', 'мой прогресс', 'подарить повтор'}
 CODE_RE = re.compile(r'(?:подарок\s+)?(СЫЧ-[A-F0-9]{20})', re.IGNORECASE)
 
 
@@ -135,11 +140,22 @@ def handle_message(message, event_id, send, secret):
     match = CODE_RE.fullmatch(text)
     looks_like_code = bool(re.match(r'^(?:подарок(?:\s|$)|сыч[-–—\s])', text))
     offer = re.fullmatch(r'подарить\s+(\d{1,3})', text)
-    if text not in ('подарить повтор', 'у меня есть промокод') and not match and not looks_like_code and not offer and action != 'redeem':
+    with _WAITING_LOCK:
+        now = time.monotonic()
+        for expired in [user for user, until in _WAITING_FOR_CODE.items() if until <= now]:
+            _WAITING_FOR_CODE.pop(expired, None)
+        if text in _MENU_COMMANDS or offer or action == 'redeem':
+            _WAITING_FOR_CODE.pop(peer, None)
+        awaiting_code = peer in _WAITING_FOR_CODE and not action and not payload
+        if match:
+            _WAITING_FOR_CODE.pop(peer, None)
+    if not awaiting_code and text not in ('подарить повтор', 'у меня есть промокод') and not match and not looks_like_code and not offer and action != 'redeem':
         return False
 
     try:
         if text == 'у меня есть промокод':
+            with _WAITING_LOCK:
+                _WAITING_FOR_CODE[peer] = time.monotonic() + 300
             send(peer, '🎁 Пришли подарочный промокод целиком.', keyboard=menu())
         elif text == 'подарить повтор':
             cards = read('collection', str(peer))['personal']['cards']
