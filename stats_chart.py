@@ -124,7 +124,11 @@ def render_personal_progress(data):
         x = 480 if column == 1 else 615
         draw.line((x, 31, x + 25, 31), fill=color, width=4)
         draw.text((x + 34, 31), label, fill='#292720', font=font, anchor='lm')
+    label_step = max(1, ceil(72 / slot))
+    last = len(data) - 1
     for index, (label, _, _) in enumerate(data):
+        if index != last and (index % label_step or last - index < label_step):
+            continue
         x = left + slot * (index + .5)
         draw.text((x, bottom + 14), label, font=font, fill='#292720', anchor='mt')
     output = BytesIO()
