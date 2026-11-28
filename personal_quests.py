@@ -5,6 +5,7 @@ import math
 import random
 import re
 import time
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 from statistics import mean, median
@@ -17,6 +18,7 @@ from website_store import ARTIFACTS_ID, Busy, Sheets, Uncertain, append, stamp, 
 
 TAB = '_PersonalQuests'
 MAX_CANCELLATIONS = 2
+REWARD_COUNT = 3
 HEMSTITCH_MICE = 110
 RANGE = f"'{TAB}'!A2:B"
 LEVELS = {'E': ('Лёгкий', 2, 'обычный'), 'M': ('Средний', 5, 'необычный'),
@@ -143,23 +145,31 @@ def award(api, quest):
         if len(row) >= 6 and str(row[0]).strip() == owner and valid_id(row[2]):
             owned.setdefault(valid_id(row[2]), []).append((index, row))
     options = [ident for ident in candidates if not any(count(row[5]) for _, row in owned.get(ident, []))]
-    ident = random.choice(options or list(candidates))
-    row = list(candidates[ident]) + [''] * max(0, 6 - len(candidates[ident]))
+    random.shuffle(options)
+    others = [ident for ident in candidates if ident not in options]
+    random.shuffle(others)
+    selected = (options + others)[:REWARD_COUNT]
+    while len(selected) < REWARD_COUNT:
+        selected.append(random.choice(list(candidates)))
     tab = api.tabs(ARTIFACTS_ID)['Инвентарь']['sheetId']
     now = stamp()
-    if ident in owned:
-        index, existing = owned[ident][0]
-        quantity = count(existing[5])
-        if quantity != int(quantity):
-            raise ValueError('Некорректное число копий в инвентаре.')
-        first = existing[6] if len(existing) > 6 else now
-        write = update(tab, index, 5, [int(quantity) + 1, first, now])
-    else:
-        write = append(tab, [owner, quest['name'], str(ident), str(row[2]), rarity, 1, now, now])
-    photo, image = str(row[4]).strip(), str(row[5]).strip()
-    return write, dict(id=ident, name=str(row[2]), rarity=rarity,
-                       photo=photo if re.fullmatch(r'photo-?\d+_\d+(?:_[\w-]+)?', photo) else '',
-                       image=image if image.startswith(PREFIX) else '')
+    writes, rewards = [], []
+    for ident, copies in Counter(selected).items():
+        row = list(candidates[ident]) + [''] * max(0, 6 - len(candidates[ident]))
+        if ident in owned:
+            index, existing = owned[ident][0]
+            quantity = count(existing[5])
+            if quantity != int(quantity):
+                raise ValueError('Некорректное число копий в инвентаре.')
+            first = existing[6] if len(existing) > 6 else now
+            writes.append(update(tab, index, 5, [int(quantity) + copies, first, now]))
+        else:
+            writes.append(append(tab, [owner, quest['name'], str(ident), str(row[2]), rarity, copies, now, now]))
+        photo, image = str(row[4]).strip(), str(row[5]).strip()
+        rewards.append(dict(id=ident, name=str(row[2]), rarity=rarity, copies=copies,
+                            photo=photo if re.fullmatch(r'photo-?\d+_\d+(?:_[\w-]+)?', photo) else '',
+                            image=image if image.startswith(PREFIX) else ''))
+    return writes, rewards
 
 
 def finalize(key, historical_week):
@@ -177,8 +187,8 @@ def finalize(key, historical_week):
                          final_fact=fact, finished_at=stamp(), delivered=False)
             writes = []
             if quest['status'] == 'success':
-                write, quest['reward'] = award(api, quest)
-                writes.append(write)
+                reward_writes, quest['rewards'] = award(api, quest)
+                writes.extend(reward_writes)
             tab = api.tabs(ARTIFACTS_ID)[TAB]['sheetId']
             writes.append(update(tab, index, 1, [encoded(quest)]))
             api.batch(ARTIFACTS_ID, writes)
@@ -202,12 +212,17 @@ def finish_message(quest):
     title = 'Квест выполнен!' if quest['status'] == 'success' else 'Квест завершён'
     message = f"🦉 {title} «{story['title']}»\n{story[quest['status']]}\n\n"
     message += f"Итог: {quest['final_fact']:g} из {quest['target']:g} мышей."
-    reward = quest.get('reward')
-    if reward:
-        message += f"\n🎁 Карточка №{reward['id']} «{reward['name']}» · {reward['rarity']}."
-        if reward['image'] and not reward['photo']:
+    rewards = quest.get('rewards') or ([quest['reward']] if quest.get('reward') else [])
+    photos = []
+    for reward in rewards:
+        copies = reward.get('copies', 1)
+        quantity = f' ×{copies}' if copies > 1 else ''
+        message += f"\n🎁 Карточка №{reward['id']} «{reward['name']}»{quantity} · {reward['rarity']}."
+        if reward['photo']:
+            photos.append(reward['photo'])
+        elif reward['image']:
             message += '\n' + reward['image']
-    return message, (reward or {}).get('photo') or None
+    return message, ','.join(dict.fromkeys(photos)) or None
 
 
 def process_closed(send):
@@ -326,7 +341,7 @@ def handle_message(message, send):
                 if not quest:
                     changed = 'Цель обновилась. Проверь её и подтверди снова.\n\n' if action == 'accept' else ''
                     inline(f'{changed}{label} квест · {target:g} мышей до {week["endDisplay"]}\n'
-                           f'Награда за успех: карточка · {rarity}.\n\n{HONESTY}',
+                           f'Награда за успех: {REWARD_COUNT} карточки · {rarity}.\n\n{HONESTY}',
                            [button('Принять квест', pq='accept', week=week['start'], level=level, target=target,
                                    attempt=used, hemstitch_week=adjusted_week)])
                     return True
