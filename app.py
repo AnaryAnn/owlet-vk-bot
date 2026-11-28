@@ -2210,32 +2210,50 @@ def run_pending_card_draws():
         time.sleep(30)
 
 
-def recover_nov24_evening_reports():
-    if datetime.now(ZoneInfo('UTC')) >= datetime(2026, 11, 24, 18, tzinfo=ZoneInfo('UTC')):
+def recover_configured_reports():
+    raw = os.environ.get('OWLET_REPORT_RECOVERY', '')
+    if not raw:
+        return
+    from sheets_api import TIMEZONE, current_week
+
+    config = json.loads(raw)
+    if time.time() >= config['expires'] or current_week()['start'] != config['week']:
         return
     time.sleep(8)
-    reports = (
-        ('8664f30d50aa3039186718ac093ddc841025fef8', 'Юлия Березина', 20, 0),
-        ('1ccc0823c63fb4ba4fe2e06375dbe69c278fe06f', 'Екатерина Степанова', 10, 1),
-    )
+    reports = config['reports']
     try:
-        participants = google_get({'action': 'participants'})['participants']
+        stats = google_get({'action': 'stats'})
+        participants = stats['participants']
     except Exception:
-        app.logger.exception('NOV24_EVENING_PARTICIPANTS_FAILED')
+        app.logger.exception('REPORT_RECOVERY_PARTICIPANTS_FAILED')
         return
-    for index, (event_id, name, plan, fact) in enumerate(reports, 1):
+    for index, (event_id, name, plan, fact, received) in enumerate(reports, 1):
         try:
             report_id = f'vk-{event_id}'
             matches = {str(person['vkId']) for person in participants
                        if str(person.get('vkId', '')).isdigit()
                        and person['name'].casefold().split() == name.casefold().split()}
+            if not matches:
+                matches = {str(person['vkId']) for person in vk_get_chat_members(STATS_PEER_ID)
+                           if person['name'].casefold().split() == name.casefold().split()}
             if len(matches) != 1:
                 raise ValueError('Cannot resolve report author uniquely')
             user_id = int(matches.pop())
+            bound_names = {person['name'] for person in participants if str(person['vkId']) == str(user_id)}
+            for row in stats['currentRecords']:
+                if row['name'] in bound_names and row.get('updated'):
+                    updated = datetime.strptime(row['updated'], '%d.%m.%Y %H:%M:%S').replace(tzinfo=ZoneInfo(TIMEZONE))
+                    if updated.timestamp() > received:
+                        app.logger.warning('REPORT_RECOVERY_NEWER_RECORD index=%s', index)
+                        break
+            else:
+                updated = None
+            if updated is not None and updated.timestamp() > received:
+                continue
             result = google_save_report(user_id, plan, fact, report_id, artifact_peer_id=STATS_PEER_ID)
             if not result.get('success'):
                 raise RuntimeError('Report save was not confirmed')
-            app.logger.warning('NOV24_EVENING_SAVED index=%s', index)
+            app.logger.warning('REPORT_RECOVERY_SAVED index=%s', index)
             random_id = (int.from_bytes(hashlib.sha256(
                 f'report-confirmation:{report_id}'.encode()).digest()[:4], 'big') & 0x7fffffff) or 1
             confirmation = send_report_confirmation_background(
@@ -2245,15 +2263,15 @@ def recover_nov24_evening_reports():
             if confirmation is None:
                 raise RuntimeError('VK did not confirm report notification')
             mark_event_async(event_id, user_id, STATS_PEER_ID)
-            app.logger.warning('NOV24_EVENING_CONFIRMED index=%s', index)
+            app.logger.warning('REPORT_RECOVERY_CONFIRMED index=%s', index)
         except Exception:
-            app.logger.exception('NOV24_EVENING_FAILED index=%s', index)
+            app.logger.exception('REPORT_RECOVERY_FAILED index=%s', index)
 
 
 if os.environ.get('RENDER') == 'true':
     if os.environ.get('NATIVE_STORAGE_ENABLED', '').lower() == 'true':
-        threading.Thread(target=recover_nov24_evening_reports,
-                         daemon=True, name='recover-nov24-evening-reports').start()
+        threading.Thread(target=recover_configured_reports,
+                         daemon=True, name='recover-configured-reports').start()
         threading.Thread(target=check_artifact_lock,
                          daemon=True, name='artifact-lock-check').start()
         threading.Thread(target=personal_quests.worker, args=(vk_send,),
