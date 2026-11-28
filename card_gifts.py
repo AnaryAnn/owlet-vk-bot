@@ -89,7 +89,9 @@ def check_gift(found, peer):
     if gift['owner'] == peer:
         raise ValueError('Свой подарок забрать нельзя.')
     recipient = gift.get('recipient')
-    if recipient is not None and recipient != peer:
+    if recipient is not None:
+        if recipient == peer:
+            raise ValueError('Ты уже использовал этот промокод. Карточка в твоей коллекции.')
         raise ValueError('Промокод уже использован.')
     return gift
 
@@ -100,8 +102,6 @@ def redeem(peer, name, digest):
         with api.locked(ARTIFACTS_ID):
             found = locate(journal(api), digest)
             gift = check_gift(found, peer)
-            if gift.get('recipient') == peer:
-                return gift
             if not gift.get('issued_at'):
                 raise ValueError('Для этого промокода списание не подтверждено.')
             inventory = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H"])[0]
@@ -133,8 +133,9 @@ def handle_message(message, event_id, send, secret):
         payload = {}
     action = payload.get('gift') if isinstance(payload, dict) else None
     match = CODE_RE.fullmatch(text)
+    looks_like_code = bool(re.match(r'^(?:подарок(?:\s|$)|сыч[-–—\s])', text))
     offer = re.fullmatch(r'подарить\s+(\d{1,3})', text)
-    if text not in ('подарить повтор', 'у меня есть промокод') and not match and not offer and action != 'redeem':
+    if text not in ('подарить повтор', 'у меня есть промокод') and not match and not looks_like_code and not offer and action != 'redeem':
         return False
 
     try:
@@ -176,6 +177,8 @@ def handle_message(message, event_id, send, secret):
                 gift = check_gift(locate(journal(Sheets(session)), digest), peer)
             send(peer, f"🎁 Принять карточку №{gift['card']}?",
                  keyboard={'inline': True, 'buttons': [[button('Принять подарок', gift='redeem', code_hash=digest)]]})
+        else:
+            raise ValueError('Неверный формат промокода. Скопируй код целиком, начиная с «СЫЧ-».')
     except ValueError as exc:
         send(peer, f'🦉 {exc}', keyboard=menu())
     except (Busy, Uncertain):
