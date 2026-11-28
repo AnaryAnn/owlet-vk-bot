@@ -3,6 +3,8 @@ import json
 import math
 import os
 import ssl
+from functools import lru_cache
+from threading import Lock
 import re
 import time
 import logging
@@ -112,13 +114,29 @@ class GoogleTLSAdapter(requests.adapters.HTTPAdapter):
             conn.ca_cert_dir = None
 
 
+class BoundedAuthRequest(Request):
+    def __call__(self, url, method='GET', body=None, headers=None, timeout=8, **kwargs):
+        return super().__call__(url, method=method, body=body, headers=headers,
+                                timeout=min(timeout or 8, 8), **kwargs)
+
+
+class SheetsCredentials(service_account.Credentials):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._refresh_lock = Lock()
+
+    def before_request(self, request, method, url, headers):
+        with self._refresh_lock:
+            return super().before_request(request, method, url, headers)
+
+
 class SheetsSession(AuthorizedSession):
     """Explicit service-account auth; never consult ambient netrc credentials."""
     def __init__(self, credentials):
         self._owned_auth_session = requests.Session()
         self._owned_auth_session.trust_env = False
         self._owned_auth_session.mount('https://oauth2.googleapis.com/', GoogleTLSAdapter())
-        super().__init__(credentials, auth_request=Request(self._owned_auth_session),
+        super().__init__(credentials, auth_request=BoundedAuthRequest(self._owned_auth_session),
                          refresh_timeout=20)
         self.trust_env = False
         self.mount('https://sheets.googleapis.com/', GoogleTLSAdapter())
@@ -134,10 +152,14 @@ def _session(write=False):
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not raw:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
+    return SheetsSession(_credentials(raw, write))
+
+
+@lru_cache(maxsize=2)
+def _credentials(raw, write):
     info = json.loads(raw)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"] if write else SCOPES
-    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    return SheetsSession(creds)
+    return SheetsCredentials.from_service_account_info(info, scopes=scopes)
 
 
 def read_value_ranges(session, book, ranges, formatted=False, timeout=25):
