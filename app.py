@@ -633,8 +633,9 @@ def send_personal_collection(peer_id, event_id):
         message += f'\nВсего с повторами: {copies:g}'
     send(message, 'summary', keyboard=card_exchange.menu())
 
-    for start in range(0, len(cards), 5):
-        batch = cards[start:start + 5]
+    batch_size = 10
+    for start in range(0, len(cards), batch_size):
+        batch = cards[start:start + batch_size]
         lines = []
         photos = []
         for card in batch:
