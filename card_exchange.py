@@ -120,7 +120,7 @@ def button(label, **payload):
 
 
 def menu():
-    return {'one_time': False, 'buttons': [[button('Моя коллекция'), button('Обмен')], [button('Внести данные'), button('Квест')], [button('Мой прогресс')]]}
+    return {'one_time': False, 'buttons': [[button('Моя коллекция'), button('Обмен')], [button('Внести данные'), button('Квест')], [button('Мой прогресс')], [button('Подарить повтор'), button('У меня есть промокод')]]}
 
 
 def signature(secret, peer_id, card_id, cost, nonce, expiry):
