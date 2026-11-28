@@ -123,6 +123,46 @@ def menu():
     return {'one_time': False, 'buttons': [[button('Моя коллекция'), button('Обмен')], [button('Внести данные'), button('Квест')], [button('Мой прогресс')], [button('Подарить повтор'), button('У меня есть промокод')]]}
 
 
+WELCOME = """🦉🤖 РОБОСЫЧИК НА СВЯЗИ!
+
+Приветствую, пернатый герой! Я — твой механический помощник, специалист по мармеладным мышам, вышивальной статистике и подозрительным магическим происшествиям.
+
+Со мной тебя ждут увлекательные квесты, коллекционные артефакты и приключения разной степени безумия!
+
+Запускаю протокол знакомства… ⚙️ Приготовь иголочку, запасись печеньками — и вперёд, к новым достижениям! ❤️
+
+📚 Моя коллекция — посмотреть собранные карточки.
+🔄 Обмен — обменять лишние копии на случайную карточку.
+📝 Внести данные — посмотреть последние значения и отправить план и факт.
+🎯 Квест — выбрать личный квест или проверить его прогресс.
+📈 Мой прогресс — посмотреть свои отчёты и график с 29 сентября.
+🎁 Подарить повтор — создать одноразовый код для лишней карточки.
+🔑 У меня есть промокод — ввести код и забрать подарок."""
+
+
+def send_welcome(message, event_id, send):
+    text = ' '.join(str(message.get('text') or '').casefold().split())
+    payload = message.get('payload') or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = {}
+    start = isinstance(payload, dict) and payload.get('command') == 'start'
+    sticker = bool(message.get('sticker_id')) or any(
+        attachment.get('type') == 'sticker' for attachment in (message.get('attachments') or [])
+        if isinstance(attachment, dict))
+    greeting = re.fullmatch(
+        r'(?:привет(?:ик)?|здравствуй(?:те)?|доброе утро|добрый день|добрый вечер)'
+        r'(?:(?:[,!]?\s+)(?:робосычик|сычик|бот))?[\W_]*', text)
+    if not (start or sticker or greeting or text == 'начать'):
+        return False
+    peer = int(message['peer_id'])
+    random_id = f'welcome:{peer}:{event_id}' if event_id else None
+    send(peer, WELCOME, keyboard=menu(), random_id=random_id)
+    return True
+
+
 def signature(secret, peer_id, card_id, cost, nonce, expiry):
     data = f'{peer_id}:{card_id}:{cost}:{nonce}:{expiry}'.encode()
     return hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()[:24]
