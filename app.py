@@ -26,6 +26,7 @@ import native_storage
 from website_store import check_artifact_lock
 import quest_votes  # Callback dependencies are initialized before any worker starts.
 import card_exchange
+import card_gifts
 import personal_quests
 import admin_publish  # Initialize private-message handlers before worker threads.
 
@@ -1733,6 +1734,7 @@ def process_vk_event(data):
                     send_private_progress(int(peer_id), event_id)
                 elif (not handle_private_report(int(peer_id), text, msg, event_id)
                         and not personal_quests.handle_message(msg, vk_send)
+                        and not card_gifts.handle_message(msg, event_id, vk_send, VK_TOKEN)
                         and not card_exchange.handle_message(msg, vk_send, VK_TOKEN)):
                     admin_publish.handle_message(msg, vk_send, VK_TOKEN)
             else:
