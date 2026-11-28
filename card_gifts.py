@@ -59,12 +59,26 @@ def make_gift(owner, card, code):
                 if found[1]['owner'] != owner or found[1]['card'] != card:
                     raise ValueError('Этот запрос относится к другому подарку.')
                 return found[1]
-            inventory = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H"])[0]
-            if sum(quantities(inventory_rows(inventory, owner, card))) < 2:
+            inventory, catalog = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H", "'Артефакты'!A2:F"])
+            source = inventory_rows(inventory, owner, card)
+            copies = quantities(source)
+            if sum(copies) < 2:
                 raise ValueError('Для подарка нужны хотя бы две копии карточки.')
-            gift = dict(owner=owner, card=card)
+            row = next((r for r in catalog if len(r) >= 3 and valid_id(r[0]) == card), None)
+            if row is None:
+                raise ValueError('Карточка не найдена в каталоге.')
+            photo = str(row[4]).strip() if len(row) > 4 else ''
+            now = stamp()
+            gift = dict(owner=owner, card=card, name=str(row[2]), rarity=str(row[1]), issued_at=now,
+                        photo=photo if re.fullmatch(r'photo-?\d+_\d+(?:_[\w-]+)?', photo) else '')
+            index = next(i for i in range(len(source) - 1, -1, -1) if copies[i])
+            source_index, old = source[index]
+            inventory_id = api.tabs(ARTIFACTS_ID)['Инвентарь']['sheetId']
             tab = api.ensure_tab(ARTIFACTS_ID, TAB, ['code_hash', 'gift_json'])
-            api.batch(ARTIFACTS_ID, [append(tab, [digest, json.dumps(gift)])])
+            api.batch(ARTIFACTS_ID, [
+                update(inventory_id, source_index, 5, [copies[index] - 1, old[6], now]),
+                append(tab, [digest, json.dumps(gift, ensure_ascii=False)]),
+            ])
             return gift
 
 
@@ -88,31 +102,22 @@ def redeem(peer, name, digest):
             gift = check_gift(found, peer)
             if gift.get('recipient') == peer:
                 return gift
-            inventory, catalog = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H", "'Артефакты'!A2:F"])
+            if not gift.get('issued_at'):
+                raise ValueError('Для этого промокода списание не подтверждено.')
+            inventory = api.values(ARTIFACTS_ID, ["'Инвентарь'!A2:H"])[0]
             card = gift['card']
-            source = inventory_rows(inventory, gift['owner'], card)
-            sender_quantities = quantities(source)
-            if sum(sender_quantities) < 2:
-                raise ValueError('У дарителя больше нет лишней копии этой карточки.')
             recipient = inventory_rows(inventory, peer, card)
             recipient_quantities = quantities(recipient)
-            row = next((r for r in catalog if len(r) >= 3 and valid_id(r[0]) == card), None)
-            if row is None:
-                raise ValueError('Карточка не найдена в каталоге.')
             tabs = api.tabs(ARTIFACTS_ID)
             tab = tabs['Инвентарь']['sheetId']
             now = stamp()
-            index = next(i for i in range(len(source) - 1, -1, -1) if sender_quantities[i])
-            source_index, old = source[index]
-            writes = [update(tab, source_index, 5, [sender_quantities[index] - 1, old[6], now])]
+            writes = []
             if recipient:
                 target_index, old = recipient[0]
                 writes.append(update(tab, target_index, 5, [recipient_quantities[0] + 1, old[6], now]))
             else:
-                writes.append(append(tab, [str(peer), name, str(card), str(row[2]), str(row[1]), 1, now, now]))
-            photo = str(row[4]).strip() if len(row) > 4 else ''
-            gift.update(recipient=peer, redeemed_at=now, name=str(row[2]),
-                        photo=photo if re.fullmatch(r'photo-?\d+_\d+(?:_[\w-]+)?', photo) else '')
+                writes.append(append(tab, [str(peer), name, str(card), gift['name'], gift['rarity'], 1, now, now]))
+            gift.update(recipient=peer, redeemed_at=now)
             writes.append(update(tabs[TAB]['sheetId'], found[0], 1, [json.dumps(gift, ensure_ascii=False)]))
             api.batch(ARTIFACTS_ID, writes)
             return gift
@@ -151,7 +156,7 @@ def handle_message(message, event_id, send, secret):
             if gift.get('recipient') is not None:
                 raise ValueError('Этот промокод уже закрыт. Создай новый подарок.')
             send(peer, f'🎁 Одноразовый промокод для карточки №{card}:\n{code}\n\n'
-                       'Перешли его получателю. Карточка перейдёт после подтверждения.',
+                       'Копия списана из твоей коллекции. Перешли код получателю, чтобы он забрал карточку.',
                  keyboard=menu(), random_id=f'gift-create:{peer}:{ident}')
         elif action == 'redeem':
             digest = payload.get('code_hash')
