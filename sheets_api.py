@@ -4,7 +4,6 @@ import math
 import os
 import ssl
 from functools import lru_cache
-from threading import Lock
 import re
 import time
 import logging
@@ -120,16 +119,6 @@ class BoundedAuthRequest(Request):
                                 timeout=min(timeout or 8, 8), **kwargs)
 
 
-class SheetsCredentials(service_account.Credentials):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._refresh_lock = Lock()
-
-    def before_request(self, request, method, url, headers):
-        with self._refresh_lock:
-            return super().before_request(request, method, url, headers)
-
-
 class SheetsSession(AuthorizedSession):
     """Explicit service-account auth; never consult ambient netrc credentials."""
     def __init__(self, credentials):
@@ -159,7 +148,7 @@ def _session(write=False):
 def _credentials(raw, write):
     info = json.loads(raw)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"] if write else SCOPES
-    return SheetsCredentials.from_service_account_info(info, scopes=scopes)
+    return service_account.Credentials.from_service_account_info(info, scopes=scopes)
 
 
 def read_value_ranges(session, book, ranges, formatted=False, timeout=25):
