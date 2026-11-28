@@ -2,6 +2,7 @@
 from collections import Counter
 from io import BytesIO
 from math import ceil
+import json
 import logging
 import time
 from urllib.parse import urlsplit
@@ -50,7 +51,7 @@ def render_distribution(records):
 
 
 def upload_chart(peer_id, token, chart):
-    deadline = time.monotonic() + 24
+    deadline = time.monotonic() + 30
 
     def post(stage, url, **kwargs):
         for attempt in range(2):
@@ -58,7 +59,7 @@ def upload_chart(peer_id, token, chart):
             if remaining <= 0:
                 raise requests.Timeout(f'Stats chart deadline before {stage}')
             try:
-                response = requests.post(url, timeout=(min(3, remaining), min(10, remaining)), **kwargs)
+                response = requests.post(url, timeout=(min(3, remaining), min(30, remaining)), **kwargs)
                 response.raise_for_status()
                 payload = response.json()
                 error = payload.get('error')
@@ -85,8 +86,16 @@ def upload_chart(peer_id, token, chart):
     url = vk('photos.getMessagesUploadServer', peer_id=peer_id)['upload_url']
     if urlsplit(url).scheme != 'https':
         raise ValueError('VK upload URL must use HTTPS')
-    uploaded = post('photo_upload', url, files={'photo': ('statistics.png', chart, 'image/png')})
-    saved = vk('photos.saveMessagesPhoto', **{key: uploaded[key] for key in ('server', 'photo', 'hash')})[0]
+    jpeg = BytesIO()
+    with Image.open(BytesIO(chart)) as image:
+        image.convert('RGB').save(jpeg, 'JPEG', quality=92, optimize=True)
+    uploaded = post('photo_upload', url, files={'photo': ('statistics.jpg', jpeg.getvalue(), 'image/jpeg')})
+    server, photo, upload_hash = (uploaded.get(key) for key in ('server', 'photo', 'hash'))
+    if isinstance(photo, (list, dict)):
+        photo = json.dumps(photo, separators=(',', ':'))
+    if not server or not upload_hash or not isinstance(photo, str) or photo.strip() in ('', '[]', '{}', 'null'):
+        raise ValueError('VK upload did not return a photo to save')
+    saved = vk('photos.saveMessagesPhoto', server=server, photo=photo, hash=upload_hash)[0]
     access_key = saved.get('access_key')
     return f"photo{saved['owner_id']}_{saved['id']}" + (f'_{access_key}' if access_key else '')
 
