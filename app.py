@@ -1655,8 +1655,9 @@ def send_private_progress(peer_id, event_id):
         current = date.fromisoformat(snapshot['currentWeek']['start'])
         weeks = {week['weekStart']: week for week in snapshot['weeks']}
         data = []
-        lines = ['📈 Мой прогресс · 6 игровых недель']
-        for offset in range(5, -1, -1):
+        first_week = date(2026, 9, 29)
+        lines = ['📈 Мой прогресс · с 29.09.2026']
+        for offset in range((current - first_week).days // 7, -1, -1):
             start = current - timedelta(weeks=offset)
             label = start.strftime('%d.%m')
             records = weeks.get(start.isoformat(), {}).get('records', [])
@@ -1677,7 +1678,7 @@ def send_private_progress(peer_id, event_id):
         reference, _ = calculate(snapshot, name)
         if reference is not None:
             lines.append(f'\nОриентир для нового квеста: {reference} 🐭 '
-                         '(среднее и медиана факта за завершённые недели, до поправки на мережку).')
+                         '(среднее и медиана факта за последние шесть завершённых недель, до поправки на мережку).')
     except Exception:
         app.logger.exception('PRIVATE_PROGRESS_READ_FAILED')
         vk_send(peer_id, '🦉 Не удалось загрузить прогресс. Попробуй чуть позже.',
